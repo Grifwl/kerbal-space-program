@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KSP Career Economy</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>KSP Career Economy</h1>
+      <p class="subtitle">Are contracts paying for your rockets?</p>
+    </div>
+    <div class="status" id="status" role="status" aria-live="polite">
+      <span class="status-icon" aria-hidden="true"></span>
+      <span class="status-text">Connecting…</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Headline answer: the single figure the whole page exists for. -->
+    <section class="hero card" aria-labelledby="hero-label">
+      <p class="label" id="hero-label">Mission balance</p>
+      <p class="hero-value" id="hero-value">—</p>
+      <p class="hero-verdict" id="hero-verdict">Waiting for data from the game…</p>
+      <p class="hero-formula" id="hero-formula"></p>
+    </section>
+
+    <section class="tiles" aria-label="Current balances">
+      <article class="card tile" data-metric="funds">
+        <p class="label"><span class="key key-funds" aria-hidden="true"></span>Funds</p>
+        <p class="tile-value">—</p>
+        <p class="tile-delta"></p>
+      </article>
+      <article class="card tile" data-metric="science">
+        <p class="label"><span class="key key-science" aria-hidden="true"></span>Science</p>
+        <p class="tile-value">—</p>
+        <p class="tile-delta"></p>
+      </article>
+      <article class="card tile" data-metric="reputation">
+        <p class="label"><span class="key key-reputation" aria-hidden="true"></span>Reputation</p>
+        <p class="tile-value">—</p>
+        <p class="tile-delta"></p>
+      </article>
+    </section>
+
+    <section class="card" aria-labelledby="history-title">
+      <div class="card-head">
+        <h2 id="history-title">History</h2>
+        <div class="segmented" role="radiogroup" aria-label="Time axis">
+          <button type="button" role="radio" aria-checked="true" data-axis="real">Real time</button>
+          <button type="button" role="radio" aria-checked="false" data-axis="game">Game time</button>
+        </div>
+      </div>
+      <div class="charts">
+        <figure class="chart">
+          <figcaption>Funds</figcaption>
+          <div class="chart-box"><canvas id="chart-funds" aria-label="Funds over time"></canvas></div>
+        </figure>
+        <figure class="chart">
+          <figcaption>Science</figcaption>
+          <div class="chart-box"><canvas id="chart-science" aria-label="Science over time"></canvas></div>
+        </figure>
+        <figure class="chart">
+          <figcaption>Reputation</figcaption>
+          <div class="chart-box"><canvas id="chart-reputation" aria-label="Reputation over time"></canvas></div>
+        </figure>
+      </div>
+    </section>
+
+    <div class="split">
+      <section class="card" aria-labelledby="breakdown-title">
+        <h2 id="breakdown-title">Where the money went</h2>
+        <p class="hint">Funds since tracking began, by cause.</p>
+        <div id="breakdown" class="breakdown"></div>
+      </section>
+
+      <section class="card" aria-labelledby="vessels-title">
+        <h2 id="vessels-title">Cost per vessel</h2>
+        <p class="hint">Launch cost minus what came back from recoveries and reverts.</p>
+        <div class="table-wrap">
+          <table class="data">
+            <thead>
+              <tr><th>Vessel</th><th class="num">Flights</th><th class="num">Cost</th><th class="num">Recovered</th><th class="num">Net</th></tr>
+            </thead>
+            <tbody id="vessels"><tr><td colspan="5" class="empty">No launches yet.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <section class="card" aria-labelledby="events-title">
+      <h2 id="events-title">Ledger</h2>
+      <p class="hint">Latest detected events. Contract amounts are exact; vessel and “other” amounts are inferred from the balance change.</p>
+      <div class="table-wrap tall">
+        <table class="data">
+          <thead>
+            <tr><th>Time</th><th>Game time</th><th>Event</th><th>Detail</th><th class="num">Funds</th><th class="num">Science</th><th class="num">Reputation</th></tr>
+          </thead>
+          <tbody id="events"><tr><td colspan="7" class="empty">Nothing recorded yet.</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/vendor/chart.umd.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
