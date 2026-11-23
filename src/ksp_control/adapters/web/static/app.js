@@ -22,6 +22,7 @@
   const EVENT_LABELS = {
     contract_accepted: "Contract accepted",
     contract_completed: "Contract completed",
+    contract_progress: "Contract objective",
     contract_failed: "Contract failed",
     contract_cancelled: "Contract cancelled",
     contract_reverted: "Contract reverted",

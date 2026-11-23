@@ -17,6 +17,7 @@ import logging
 import tempfile
 from pathlib import Path
 
+from ksp_control.adapters.game.krpc_connection import KrpcEndpoint
 from ksp_control.adapters.game.krpc_telemetry import KrpcTelemetry
 from ksp_control.adapters.game.simulated_telemetry import SimulatedTelemetry
 from ksp_control.adapters.persistence.sqlite_repository import SqliteEconomyRepository
@@ -41,8 +42,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--db", default="data/career.sqlite",
                         help="SQLite file for this career (use one file per save game).")
     parser.add_argument("--krpc-address", default="127.0.0.1", help="kRPC server address.")
-    parser.add_argument("--rpc-port", type=int, default=50000, help="kRPC RPC port.")
-    parser.add_argument("--stream-port", type=int, default=50001, help="kRPC stream port.")
+    parser.add_argument("--krpc-port", type=int, default=50000,
+                        help="Port of the kRPC TCP/IP server.")
     parser.add_argument("--interval", type=float, default=2.0, help="Seconds between polls.")
     parser.add_argument("--host", default="127.0.0.1",
                         help="Web server interface (0.0.0.0 to open it to your LAN).")
@@ -64,7 +65,7 @@ def build_telemetry(args: argparse.Namespace) -> GameTelemetryPort:
     """
     if args.demo:
         return SimulatedTelemetry()
-    return KrpcTelemetry(args.krpc_address, args.rpc_port, args.stream_port)
+    return KrpcTelemetry(KrpcEndpoint(args.krpc_address, args.krpc_port))
 
 
 def main(argv: list[str] | None = None) -> None:

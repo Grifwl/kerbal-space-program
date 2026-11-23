@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
 from ksp_control.application.ports import (
@@ -23,7 +23,13 @@ from ksp_control.application.ports import (
     GameUnavailableError,
 )
 from ksp_control.domain.ledger import LedgerAnalyzer, LedgerSummary
-from ksp_control.domain.model import GameSnapshot, LedgerEvent, ResourceSample
+from ksp_control.domain.model import (
+    ContractBook,
+    EventKind,
+    GameSnapshot,
+    LedgerEvent,
+    ResourceSample,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +108,11 @@ class EconomyMonitorService:
         self._analyzer = analyzer or LedgerAnalyzer()
         self._heartbeat = heartbeat
         self._previous: GameSnapshot | None = None
+        self._last_read_contracts: ContractBook | None = None
+        # Objectives already paid, kept across restarts: kRPC does not always
+        # flag paid objectives as completed, and a completion must not pay
+        # them a second time.
+        self._paid_objectives = repository.paid_objectives()
         self._status = MonitorStatus()
         self._lock = threading.Lock()
 
@@ -129,25 +140,36 @@ class EconomyMonitorService:
                 self._status = MonitorStatus(False, str(error), now)
                 return []
 
-            # A snapshot without contracts (e.g. read while a scene was
-            # loading) is stored for the charts but never used for the diff:
-            # comparing it would push contract money into the residual, and
-            # the next complete snapshot would then count it a second time.
-            # The last complete snapshot stays as the reference instead.
+            # A snapshot whose contracts are not trustworthy (read while a
+            # scene was loading) is stored for the charts but never used for
+            # the diff: comparing it would invent contract events, and the
+            # next good snapshot would then invent the opposite ones. The
+            # last trusted snapshot stays as the reference instead, so the
+            # money is attributed once, when the contracts settle.
             events: list[LedgerEvent] = []
-            if snapshot.contracts is not None:
-                if self._previous is not None:
+            if self._contracts_trusted(snapshot):
+                snapshot = self._with_paid_objectives(snapshot)
+                if self._previous is None:
+                    events = self._offline_changes(snapshot)
+                    if events:
+                        self._repository.add_events(events)
+                else:
                     events = self._analyzer.compare(self._previous, snapshot)
                     if events:
                         self._repository.add_events(events)
+                        self._remember_objectives(events)
+                        snapshot = self._with_paid_objectives(snapshot)
                         for event in events:
                             logger.info(
                                 "%s: %s %s", event.kind.value, event.description, event.delta
                             )
                 self._previous = snapshot
 
+            # History starts with the first trusted reference, so the first
+            # stored sample (the "since tracking began" baseline) and the
+            # ledger cover exactly the same period and always agree.
             sample = ResourceSample.from_snapshot(snapshot)
-            if events or self._should_store(sample):
+            if self._previous is not None and (events or self._should_store(sample)):
                 self._repository.add_sample(sample)
 
             self._status = MonitorStatus(True, _describe(snapshot), now)
@@ -176,6 +198,111 @@ class EconomyMonitorService:
     def close(self) -> None:
         """Release the game connection."""
         self._telemetry.close()
+
+    def _with_paid_objectives(self, snapshot: GameSnapshot) -> GameSnapshot:
+        """Mark the objectives known to be paid as completed in a snapshot.
+
+        Args:
+            snapshot: Snapshot with the flags read from the game.
+
+        Returns:
+            A copy whose active contracts also flag the remembered objectives.
+        """
+        book = snapshot.contracts
+        if book is None or not self._paid_objectives:
+            return snapshot
+        progress = []
+        for index, terms in enumerate(book.active):
+            read = book.active_progress[index] if index < len(book.active_progress) else ()
+            read = tuple(read) + (False,) * (len(terms.parameters) - len(read))
+            key = terms.key
+            progress.append(tuple(
+                flag or (key, i) in self._paid_objectives for i, flag in enumerate(read)
+            ))
+        return replace(snapshot, contracts=replace(book, active_progress=tuple(progress)))
+
+    def _remember_objectives(self, events: list[LedgerEvent]) -> None:
+        """Update the paid objectives after a batch of events.
+
+        Args:
+            events: Events just detected.
+        """
+        new: set[tuple[str, int]] = set()
+        for event in events:
+            if event.contract is None:
+                continue
+            if event.kind is EventKind.CONTRACT_PROGRESS:
+                new |= {(event.contract, i) for i in event.objectives}
+            elif event.kind in (
+                EventKind.CONTRACT_COMPLETED,
+                EventKind.CONTRACT_FAILED,
+                EventKind.CONTRACT_CANCELLED,
+            ):
+                # Finished: a future contract with identical terms starts clean.
+                self._repository.forget_contract_objectives(event.contract)
+                self._paid_objectives = {
+                    item for item in self._paid_objectives if item[0] != event.contract
+                }
+        if new:
+            self._repository.add_paid_objectives(new)
+            self._paid_objectives |= new
+
+    def _offline_changes(self, snapshot: GameSnapshot) -> list[LedgerEvent]:
+        """Account for what changed while the monitor was not running.
+
+        When the monitor restarts on an existing history, the balances may
+        have moved in the meantime. Recording the difference keeps the
+        invariant "the ledger adds up to the change in balances", and makes
+        the gap visible instead of silently losing it.
+
+        Args:
+            snapshot: First trusted snapshot after (re)starting.
+
+        Returns:
+            One OTHER event, or nothing when the balances did not change.
+        """
+        last = self._repository.last_sample()
+        if last is None:
+            return []
+        delta = (snapshot.resources - last.resources).cleaned()
+        if delta.is_negligible:
+            return []
+        return [
+            LedgerEvent(
+                occurred_at=snapshot.taken_at,
+                universal_time=snapshot.universal_time,
+                kind=EventKind.OTHER,
+                description="Changes while the monitor was not running",
+                delta=delta,
+            )
+        ]
+
+    def _contracts_trusted(self, snapshot: GameSnapshot) -> bool:
+        """Decide whether the contract lists of a snapshot can be diffed.
+
+        While KSP loads a scene (e.g. right after pressing Launch) kRPC may
+        briefly return empty or partial contract lists. Two guards filter
+        those transient readings out:
+
+        * the lists must be identical in two consecutive polls (they settle
+          within a poll or two, while real changes then stay put);
+        * a completely empty book is rejected when the reference had
+          contracts (KSP never forgets finished contracts by itself).
+
+        Args:
+            snapshot: The new snapshot.
+
+        Returns:
+            True when the snapshot may be compared with the reference.
+        """
+        book = snapshot.contracts
+        last_read, self._last_read_contracts = self._last_read_contracts, book
+        if book is None or last_read is None or not book.same_as(last_read):
+            return False
+        reference = self._previous.contracts if self._previous else None
+        if book.is_empty and reference is not None and not reference.is_empty:
+            return False
+        return True
 
     def _should_store(self, sample: ResourceSample) -> bool:
         """Decide whether a sample adds information to the history.

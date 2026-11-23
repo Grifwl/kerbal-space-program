@@ -11,7 +11,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import datetime
 
-from ksp_control.domain.model import GameSnapshot, LedgerEvent, ResourceSample
+from ksp_control.domain.model import GameScene, GameSnapshot, LedgerEvent, ResourceSample
+from ksp_control.domain.recovery import VesselReport
 
 
 class GameUnavailableError(RuntimeError):
@@ -94,6 +95,30 @@ class EconomyRepositoryPort(ABC):
         """
 
     @abstractmethod
+    def paid_objectives(self) -> set[tuple[str, int]]:
+        """Return the contract objectives known to be paid already.
+
+        Returns:
+            ``(contract key, objective index)`` pairs.
+        """
+
+    @abstractmethod
+    def add_paid_objectives(self, objectives: set[tuple[str, int]]) -> None:
+        """Remember contract objectives that have been paid.
+
+        Args:
+            objectives: ``(contract key, objective index)`` pairs.
+        """
+
+    @abstractmethod
+    def forget_contract_objectives(self, contract_key: str) -> None:
+        """Drop the paid objectives of a contract that is finished.
+
+        Args:
+            contract_key: Key of the contract.
+        """
+
+    @abstractmethod
     def list_events(self, limit: int | None = None) -> list[LedgerEvent]:
         """Return ledger events, newest first.
 
@@ -103,3 +128,67 @@ class EconomyRepositoryPort(ABC):
         Returns:
             Events ordered from newest to oldest.
         """
+
+
+class FleetPort(ABC):
+    """Lists the vessels of the save and recovers them."""
+
+    @abstractmethod
+    def scene(self) -> GameScene:
+        """Return the scene the game is in.
+
+        Returns:
+            The current scene.
+
+        Raises:
+            GameUnavailableError: When the game cannot be reached.
+        """
+
+    @abstractmethod
+    def funds(self) -> float:
+        """Return the current funds balance.
+
+        Returns:
+            Funds.
+
+        Raises:
+            GameUnavailableError: When the game cannot be reached.
+        """
+
+    @abstractmethod
+    def list_vessels(self) -> list[VesselReport]:
+        """Read every vessel of the save with what is needed to value it.
+
+        Returns:
+            One report per vessel.
+
+        Raises:
+            GameUnavailableError: When the game cannot be reached or the
+                current scene does not give access to the vessels.
+        """
+
+    @abstractmethod
+    def vessel_exists(self, vessel_id: str) -> bool:
+        """Tell whether a vessel listed earlier is still in the game.
+
+        Args:
+            vessel_id: Identifier from ``list_vessels``.
+
+        Returns:
+            False once the vessel has been recovered or destroyed.
+        """
+
+    @abstractmethod
+    def recover(self, vessel_id: str) -> None:
+        """Ask the game to recover a vessel (returns without waiting).
+
+        Args:
+            vessel_id: Identifier from ``list_vessels``.
+
+        Raises:
+            GameUnavailableError: When the game refuses or cannot be reached.
+        """
+
+    @abstractmethod
+    def close(self) -> None:
+        """Release any connection held by the adapter."""

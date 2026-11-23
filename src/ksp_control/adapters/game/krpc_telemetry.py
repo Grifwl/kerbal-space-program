@@ -16,22 +16,24 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from ksp_control.adapters.game.krpc_connection import (
+    RECOVERABLE_ERRORS as _RECOVERABLE_ERRORS,
+    KrpcEndpoint,
+    connect,
+    is_connection_problem as _is_connection_problem,
+    read_scene,
+)
 from ksp_control.application.ports import GameTelemetryPort, GameUnavailableError
 from ksp_control.domain.model import (
     ContractBook,
     ContractTerms,
     GameScene,
     GameSnapshot,
+    ParameterTerms,
     Resources,
 )
 
 logger = logging.getLogger(__name__)
-
-# Exceptions raised by kRPC when the server is unreachable or a call fails.
-# ConnectionError/OSError cover sockets; RuntimeError covers krpc.error.RPCError
-# and the "procedure not available in this game scene" errors.
-_RECOVERABLE_ERRORS = (ConnectionError, OSError, RuntimeError, EOFError, ValueError)
-
 
 class KrpcTelemetry(GameTelemetryPort):
     """Reads funds, science, reputation, scene and contracts through kRPC.
@@ -39,36 +41,34 @@ class KrpcTelemetry(GameTelemetryPort):
     Responsibilities:
 
     * Own the kRPC connection and reconnect transparently after failures.
-    * Cache contract terms by remote object, because reading a contract costs
-      eight remote calls and a long career has hundreds of finished
-      contracts. Only contracts never seen before are fetched, so a normal
-      poll costs a handful of calls.
+    * Cache contract terms (rewards and objective tree) by remote object,
+      because reading a contract costs dozens of remote calls and a long
+      career has hundreds of finished contracts. Only contracts never seen
+      before are fetched; afterwards a poll only reads the completion flag
+      of the objectives of the *active* contracts.
 
     Usage notes: not thread safe; use it from the polling thread only.
     """
 
     def __init__(
         self,
-        address: str = "127.0.0.1",
-        rpc_port: int = 50000,
-        stream_port: int = 50001,
+        endpoint: KrpcEndpoint | None = None,
         client_name: str = "KSP economy monitor",
     ) -> None:
         """Configure the adapter; the connection is opened on first use.
 
         Args:
-            address: Host where KSP and the kRPC server run.
-            rpc_port: kRPC RPC port.
-            stream_port: kRPC stream port.
+            endpoint: kRPC server location (local default port if omitted).
             client_name: Name shown in the kRPC server window in KSP.
         """
-        self._address = address
-        self._rpc_port = rpc_port
-        self._stream_port = stream_port
+        self._endpoint = endpoint or KrpcEndpoint()
         self._client_name = client_name
         self._conn: Any = None
-        self._contract_cache: dict[Any, ContractTerms] = {}
+        # Remote contract -> (terms, flattened remote parameters).
+        self._contract_cache: dict[Any, tuple[ContractTerms, list[Any]]] = {}
         self._warned_missing: set[str] = set()
+        # Remote vessel -> name, so each poll costs one call for the list.
+        self._vessel_names: dict[Any, str] = {}
 
     def read_snapshot(self) -> GameSnapshot:
         """Read the current state of the game.
@@ -83,7 +83,8 @@ class KrpcTelemetry(GameTelemetryPort):
         conn = self._connection()
         try:
             space_center = conn.space_center
-            scene = self._read_scene(conn)
+            scene = read_scene(conn)
+            vessel_name, prelaunch = self._read_active_vessel(space_center, scene)
             snapshot = GameSnapshot(
                 taken_at=datetime.now(timezone.utc),
                 universal_time=float(space_center.ut),
@@ -93,8 +94,10 @@ class KrpcTelemetry(GameTelemetryPort):
                     science=self._read_currency(space_center, "science"),
                     reputation=self._read_currency(space_center, "reputation"),
                 ),
-                active_vessel=self._read_active_vessel(space_center, scene),
+                active_vessel=vessel_name,
                 contracts=self._read_contracts(space_center),
+                vessel_prelaunch=prelaunch,
+                vessels=self._read_vessel_names(space_center, scene),
             )
         except _RECOVERABLE_ERRORS as error:
             # A dropped socket leaves the client unusable: start afresh.
@@ -113,6 +116,7 @@ class KrpcTelemetry(GameTelemetryPort):
         self._conn = None
         # Remote object ids are only meaningful within a server session.
         self._contract_cache.clear()
+        self._vessel_names.clear()
 
     def _connection(self) -> Any:
         """Return the open connection, connecting first if needed.
@@ -123,47 +127,9 @@ class KrpcTelemetry(GameTelemetryPort):
         Raises:
             GameUnavailableError: When the server cannot be reached.
         """
-        if self._conn is not None:
-            return self._conn
-        try:
-            # Imported lazily so the rest of the package (tests, demo mode)
-            # works even when the kRPC client is not installed.
-            import krpc
-        except ImportError as error:  # pragma: no cover - environment issue
-            raise GameUnavailableError("The 'krpc' Python package is not installed") from error
-        try:
-            self._conn = krpc.connect(
-                name=self._client_name,
-                address=self._address,
-                rpc_port=self._rpc_port,
-                stream_port=self._stream_port,
-            )
-        except _RECOVERABLE_ERRORS as error:
-            raise GameUnavailableError(
-                f"Cannot connect to kRPC at {self._address}:{self._rpc_port} "
-                f"(is KSP running with the kRPC server started?): {error}"
-            ) from error
-        logger.info("Connected to kRPC server %s", self._conn.krpc.get_status().version)
+        if self._conn is None:
+            self._conn = connect(self._endpoint, self._client_name)
         return self._conn
-
-    @staticmethod
-    def _read_scene(conn: Any) -> GameScene:
-        """Read the current game scene in a version independent way.
-
-        Args:
-            conn: Open kRPC client.
-
-        Returns:
-            The current scene.
-        """
-        krpc_service = conn.krpc
-        # kRPC >= 0.7.0 exposes ``game_scene``; older versions expose
-        # ``current_game_scene``. Both return an enum with the same names.
-        for attribute in ("game_scene", "current_game_scene"):
-            if hasattr(type(krpc_service), attribute) or hasattr(krpc_service, attribute):
-                value = getattr(krpc_service, attribute)
-                return GameScene.from_name(getattr(value, "name", str(value)))
-        return GameScene.UNKNOWN
 
     def _read_currency(self, space_center: Any, attribute: str) -> float:
         """Read one career currency.
@@ -189,20 +155,52 @@ class KrpcTelemetry(GameTelemetryPort):
             return 0.0
 
     @staticmethod
-    def _read_active_vessel(space_center: Any, scene: GameScene) -> str | None:
-        """Read the active vessel name, only meaningful in the flight scene.
+    def _read_active_vessel(space_center: Any, scene: GameScene) -> tuple[str | None, bool]:
+        """Read the active vessel, only meaningful in the flight scene.
 
         Args:
             space_center: The SpaceCenter service.
             scene: Current scene.
 
         Returns:
-            The vessel name, or ``None`` outside flight.
+            The vessel name (``None`` outside flight) and whether the vessel
+            is still waiting on the launch pad or runway (``pre_launch``).
         """
         if scene is not GameScene.FLIGHT:
+            return None, False
+        try:
+            vessel = space_center.active_vessel
+            situation = getattr(vessel.situation, "name", str(vessel.situation))
+            return str(vessel.name), situation.lower() == "pre_launch"
+        except _RECOVERABLE_ERRORS as error:
+            if _is_connection_problem(error):
+                raise
+            return None, False
+
+    def _read_vessel_names(self, space_center: Any, scene: GameScene) -> tuple[str, ...] | None:
+        """Read the names of every vessel.
+
+        kRPC 0.8 lists vessels in every scene where the game has them loaded
+        (flight, space center, tracking station); older versions only in
+        flight. The editors have no vessel list at all.
+
+        Args:
+            space_center: The SpaceCenter service.
+            scene: Current scene.
+
+        Returns:
+            The names, or ``None`` when they cannot be read.
+        """
+        if scene.is_editor:
             return None
         try:
-            return str(space_center.active_vessel.name)
+            names = []
+            for vessel in space_center.vessels:
+                name = self._vessel_names.get(vessel)
+                if name is None:
+                    name = self._vessel_names[vessel] = str(vessel.name)
+                names.append(name)
+            return tuple(names)
         except _RECOVERABLE_ERRORS as error:
             if _is_connection_problem(error):
                 raise
@@ -220,10 +218,12 @@ class KrpcTelemetry(GameTelemetryPort):
         """
         try:
             manager = space_center.contract_manager
+            active = manager.active_contracts
             return ContractBook(
-                active=self._terms_of(manager.active_contracts),
+                active=self._terms_of(active),
                 completed=self._terms_of(manager.completed_contracts),
                 failed=self._terms_of(manager.failed_contracts),
+                active_progress=tuple(self._progress_of(contract) for contract in active),
             )
         except _RECOVERABLE_ERRORS as error:
             if _is_connection_problem(error):
@@ -240,37 +240,69 @@ class KrpcTelemetry(GameTelemetryPort):
         Returns:
             The terms of each contract, in the same order.
         """
-        result = []
-        for contract in contracts:
-            # Remote objects hash and compare by their server object id.
-            terms = self._contract_cache.get(contract)
-            if terms is None:
-                terms = ContractTerms(
-                    contract_type=str(contract.type),
-                    title=str(contract.title),
-                    funds_advance=float(contract.funds_advance),
-                    funds_completion=float(contract.funds_completion),
-                    funds_failure=float(contract.funds_failure),
-                    science_completion=float(contract.science_completion),
-                    reputation_completion=float(contract.reputation_completion),
-                    reputation_failure=float(contract.reputation_failure),
-                )
-                self._contract_cache[contract] = terms
-            result.append(terms)
-        return tuple(result)
+        return tuple(self._cached(contract)[0] for contract in contracts)
+
+    def _progress_of(self, contract: Any) -> tuple[bool, ...]:
+        """Read which objectives of an active contract are completed.
+
+        Args:
+            contract: Remote ``Contract`` object (already cached).
+
+        Returns:
+            One flag per objective, aligned with ``ContractTerms.parameters``.
+        """
+        _, parameters = self._cached(contract)
+        return tuple(bool(parameter.completed) for parameter in parameters)
+
+    def _cached(self, contract: Any) -> tuple[ContractTerms, list[Any]]:
+        """Return the terms and flattened objectives of a contract.
+
+        Args:
+            contract: Remote ``Contract`` object. Remote objects hash and
+                compare by their server object id, so they are valid keys.
+
+        Returns:
+            The contract terms and its remote parameters, depth-first.
+        """
+        entry = self._contract_cache.get(contract)
+        if entry is None:
+            parameters = list(_flatten(contract.parameters))
+            terms = ContractTerms(
+                contract_type=str(contract.type),
+                title=str(contract.title),
+                funds_advance=float(contract.funds_advance),
+                funds_completion=float(contract.funds_completion),
+                funds_failure=float(contract.funds_failure),
+                science_completion=float(contract.science_completion),
+                reputation_completion=float(contract.reputation_completion),
+                reputation_failure=float(contract.reputation_failure),
+                parameters=tuple(
+                    ParameterTerms(
+                        title=str(p.title),
+                        funds=float(p.funds_completion),
+                        science=float(p.science_completion),
+                        reputation=float(p.reputation_completion),
+                        optional=bool(p.optional),
+                    )
+                    for p in parameters
+                ),
+            )
+            entry = (terms, parameters)
+            self._contract_cache[contract] = entry
+        return entry
 
 
-def _is_connection_problem(error: BaseException) -> bool:
-    """Tell socket-level failures apart from errors raised by a single RPC.
+def _flatten(parameters: list[Any]) -> list[Any]:
+    """Flatten a tree of contract parameters depth-first.
 
     Args:
-        error: The exception raised while talking to kRPC.
+        parameters: Remote ``ContractParameter`` objects.
 
     Returns:
-        True when the connection itself is broken and must be reopened.
+        Every parameter, each one followed by its descendants.
     """
-    # Sockets raise OSError (socket.error) when the server goes away. kRPC
-    # defines its own ``krpc.error.ConnectionError`` deriving from
-    # RuntimeError (not from the built-in one), so it is matched by name to
-    # avoid importing krpc at module import time.
-    return isinstance(error, (OSError, EOFError)) or type(error).__name__ == "ConnectionError"
+    result = []
+    for parameter in parameters:
+        result.append(parameter)
+        result.extend(_flatten(parameter.children))
+    return result

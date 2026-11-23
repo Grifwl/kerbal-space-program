@@ -12,7 +12,7 @@ dependencies = [
     # The kRPC client MUST match the kRPC mod installed in KSP. Version 0.8.0
     # changed the wire protocol, so clients and servers from different
     # release lines cannot talk to each other. Bump this together with the mod.
-    "krpc==0.5.2",
+    "krpc==0.8.0",
     "flask>=3.0",
 ]
 
@@ -21,6 +21,7 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 ksp-economy-monitor = "ksp_control.entrypoints.economy_monitor:main"
+ksp-recover = "ksp_control.entrypoints.recover_vessels:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

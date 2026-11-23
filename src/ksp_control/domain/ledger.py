@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from itertools import combinations
 
 from ksp_control.domain.model import (
     ContractBook,
@@ -56,11 +57,26 @@ class LedgerAnalyzer:
 
         # Contracts first: they are the only source with exact, known amounts.
         if previous.contracts is not None and current.contracts is not None:
-            for kind, terms, delta in _diff_contracts(previous.contracts, current.contracts):
-                events.append(self._event(current, kind, terms.title, delta))
+            for kind, terms, delta, done in _diff_contracts(previous.contracts, current.contracts):
+                events.append(
+                    self._event(current, kind, terms.title, delta, contract=terms, objectives=done)
+                )
 
         explained = sum((event.delta for event in events), Resources())
         residual = (current.resources - previous.resources - explained).cleaned()
+
+        # Objectives the game paid but did not flag as completed (kRPC may
+        # report them as pending): recognized by their exact amount.
+        if residual.funds > 0 and current.contracts is not None:
+            matched = _match_objectives(current.contracts, residual.funds)
+            for terms, indices in matched:
+                paid = sum((terms.parameters[i].reward for i in indices), Resources())
+                events.append(self._event(
+                    current, EventKind.CONTRACT_PROGRESS, terms.title, paid,
+                    contract=terms, objectives=indices,
+                ))
+                residual = (residual - paid).cleaned()
+
         if not residual.is_negligible:
             events.extend(self._explain_residual(previous, current, residual))
         return events
@@ -82,8 +98,12 @@ class LedgerAnalyzer:
         funds = residual.funds
 
         # Funds are charged when the vessel is rolled out to the launch pad or
-        # runway, i.e. on the transition into the flight scene.
-        if after is GameScene.FLIGHT and before is not GameScene.FLIGHT and funds < 0:
+        # runway. KSP opens the flight scene first and deducts the cost a
+        # moment later, so the charge may land on the transition into flight
+        # or in a later reading while the vessel is still waiting on the pad.
+        entering_flight = after is GameScene.FLIGHT and before is not GameScene.FLIGHT
+        waiting_on_pad = after is GameScene.FLIGHT and current.vessel_prelaunch
+        if (entering_flight or waiting_on_pad) and funds < 0:
             vessel = current.active_vessel or "Unknown vessel"
             return self._split(
                 current, residual, EventKind.VESSEL_LAUNCHED, f"Launched {vessel}", vessel,
@@ -104,16 +124,26 @@ class LedgerAnalyzer:
             GameScene.SPACE_CENTER,
             GameScene.TRACKING_STATION,
         )
-        recovered_in_tracking = (
-            before is GameScene.TRACKING_STATION and after is GameScene.TRACKING_STATION
-        )
-        if (recovered_from_flight or recovered_in_tracking) and funds > 0:
-            vessel = previous.active_vessel if recovered_from_flight else None
+        if recovered_from_flight and funds > 0:
+            vessel = previous.active_vessel
             label = f"Recovered {vessel}" if vessel else "Recovered a vessel"
             return self._split(
                 current, residual, EventKind.VESSEL_RECOVERED, label, vessel,
                 keep_science=True,
             )
+
+        # Recovering a vessel without changing scene (a stage that splashed
+        # down nearby, during the flight; or pieces left behind, from the
+        # space center or the tracking station) pays funds; the vessel that
+        # vanished from the list tells which one it was.
+        if before is after and funds > 0:
+            gone = _vanished_vessels(previous, current)
+            if gone:
+                names = ", ".join(gone)
+                return self._split(
+                    current, residual, EventKind.VESSEL_RECOVERED, f"Recovered {names}", names,
+                    keep_science=True,
+                )
 
         return [self._event(current, EventKind.OTHER, _describe_other(residual), residual)]
 
@@ -158,6 +188,8 @@ class LedgerAnalyzer:
         description: str,
         delta: Resources,
         vessel: str | None = None,
+        contract: ContractTerms | None = None,
+        objectives: tuple[int, ...] = (),
     ) -> LedgerEvent:
         """Create an event stamped with the snapshot's times.
 
@@ -167,6 +199,8 @@ class LedgerAnalyzer:
             description: Human readable text.
             delta: Change in balances.
             vessel: Vessel involved, if any.
+            contract: Contract involved, if any.
+            objectives: Objectives paid by the event, if any.
 
         Returns:
             The new ledger event.
@@ -178,17 +212,104 @@ class LedgerAnalyzer:
             description=description,
             delta=delta.cleaned(),
             vessel=vessel,
+            contract=contract.key if contract else None,
+            objectives=objectives,
         )
+
+
+def _vanished_vessels(previous: GameSnapshot, current: GameSnapshot) -> list[str]:
+    """Names of the vessels present before and missing now.
+
+    Args:
+        previous: The earlier snapshot.
+        current: The later snapshot.
+
+    Returns:
+        The missing vessel names (empty when unknown or none vanished).
+    """
+    if previous.vessels is None or current.vessels is None:
+        return []
+    return sorted((Counter(previous.vessels) - Counter(current.vessels)).elements())
+
+
+# How KSP names the debris of a vessel, per game language. A piece that
+# separates from debris gets the marker again ("Escombros de Escombros de X").
+DEBRIS_SUFFIXES = (" Debris",)
+DEBRIS_PREFIXES = ("Escombros de ",)
+
+
+def owner_vessel(name: str) -> str:
+    """Name of the vessel a piece of debris came from.
+
+    KSP names the stages and parts that separate from a vessel after it
+    (``"X Debris"`` in English, ``"Escombros de X"`` in Spanish); their
+    recoveries belong to that vessel.
+
+    Args:
+        name: Vessel or debris name.
+
+    Returns:
+        The name without any debris marker.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for suffix in DEBRIS_SUFFIXES:
+            if name.endswith(suffix):
+                name, changed = name[: -len(suffix)], True
+        for prefix in DEBRIS_PREFIXES:
+            if name.startswith(prefix):
+                name, changed = name[len(prefix):], True
+    return name
+
+
+def _match_objectives(
+    book: ContractBook, amount: float, max_items: int = 4, max_candidates: int = 20
+) -> list[tuple[ContractTerms, tuple[int, ...]]]:
+    """Find the pending objectives whose rewards add up to an amount.
+
+    Smaller combinations are preferred: one objective paying exactly the
+    amount is a far more likely explanation than four that happen to add up.
+
+    Args:
+        book: Contracts after the change (objective flags already merged
+            with the objectives known to be paid).
+        amount: Unexplained funds received.
+        max_items: Largest combination tried.
+        max_candidates: Pending objectives considered (bounds the search).
+
+    Returns:
+        ``(contract, objective indices)`` pairs, or an empty list when no
+        combination matches within half a fund.
+    """
+    candidates: list[tuple[ContractTerms, int, float]] = []
+    for terms, copies in book.progress_by_contract().items():
+        flags = copies[0] + (False,) * len(terms.parameters)
+        for index, parameter in enumerate(terms.parameters):
+            if not flags[index] and parameter.funds > 0:
+                candidates.append((terms, index, parameter.funds))
+    candidates = candidates[:max_candidates]
+
+    for size in range(1, min(max_items, len(candidates)) + 1):
+        for combo in combinations(candidates, size):
+            if abs(sum(c[2] for c in combo) - amount) < 0.5:
+                grouped: dict[ContractTerms, list[int]] = {}
+                for terms, index, _ in combo:
+                    grouped.setdefault(terms, []).append(index)
+                return [(terms, tuple(indices)) for terms, indices in grouped.items()]
+    return []
 
 
 def _diff_contracts(
     previous: ContractBook, current: ContractBook
-) -> list[tuple[EventKind, ContractTerms, Resources]]:
+) -> list[tuple[EventKind, ContractTerms, Resources, tuple[int, ...]]]:
     """Detect contract state changes by comparing contract multisets.
 
     For every distinct contract the counts in each group are compared:
 
-    * more completed / failed copies -> completed / failed events;
+    * more completed / failed copies -> completed / failed events (a
+      completion also pays the objectives that were still pending);
+    * more objectives done on a contract that stays active -> progress;
     * fewer completed / failed copies -> the game travelled back in time
       ("revert to launch" or a quickload), so the reward is undone;
     * a change in active copies not explained by the above is an acceptance
@@ -199,14 +320,17 @@ def _diff_contracts(
         current: Contracts in the later snapshot.
 
     Returns:
-        Tuples of (kind, contract, expected change in balances).
+        Tuples of (kind, contract, expected change in balances, objectives
+        newly completed).
     """
     prev_active, prev_done, prev_failed = previous.counts()
     cur_active, cur_done, cur_failed = current.counts()
+    prev_progress = previous.progress_by_contract()
+    cur_progress = current.progress_by_contract()
     every_contract = set(prev_active) | set(prev_done) | set(prev_failed)
     every_contract |= set(cur_active) | set(cur_done) | set(cur_failed)
 
-    changes: list[tuple[EventKind, ContractTerms, Resources]] = []
+    changes: list[tuple[EventKind, ContractTerms, Resources, tuple[int, ...]]] = []
     for terms in sorted(every_contract, key=lambda t: (t.title, t.contract_type)):
         d_active = _delta(prev_active, cur_active, terms)
         d_done = _delta(prev_done, cur_done, terms)
@@ -215,19 +339,44 @@ def _diff_contracts(
         completed, uncompleted = max(d_done, 0), max(-d_done, 0)
         failed, unfailed = max(d_failed, 0), max(-d_failed, 0)
 
-        changes += [(EventKind.CONTRACT_COMPLETED, terms, terms.reward)] * completed
-        changes += [(EventKind.CONTRACT_FAILED, terms, terms.penalty)] * failed
-        changes += [(EventKind.CONTRACT_REVERTED, terms, _negate(terms.reward))] * uncompleted
-        changes += [(EventKind.CONTRACT_REVERTED, terms, _negate(terms.penalty))] * unfailed
+        # On completion KSP also pays every mandatory objective that had not
+        # been paid yet; the most advanced active copy is the one finishing.
+        copies = prev_progress.get(terms, [])
+        for index in range(completed):
+            flags = copies[index] if index < len(copies) else ()
+            reward = terms.reward + terms.objectives_pending(flags)
+            changes.append((EventKind.CONTRACT_COMPLETED, terms, reward, ()))
+        changes += [(EventKind.CONTRACT_FAILED, terms, terms.penalty, ())] * failed
+        changes += [(EventKind.CONTRACT_REVERTED, terms, _negate(terms.reward), ())] * uncompleted
+        changes += [(EventKind.CONTRACT_REVERTED, terms, _negate(terms.penalty), ())] * unfailed
+
+        # Objectives completed while the contract stays active (e.g. a
+        # tourist reaching a destination) are paid immediately.
+        if d_active == 0 and not (completed or failed or uncompleted or unfailed):
+            paid_before = sum((terms.objectives_paid(f) for f in copies), Resources())
+            paid_now = sum(
+                (terms.objectives_paid(f) for f in cur_progress.get(terms, [])), Resources()
+            )
+            progress = (paid_now - paid_before).cleaned()
+            if not progress.is_negligible:
+                now_flags = cur_progress.get(terms, [()])[0]
+                before_flags = copies[0] if copies else ()
+                done = tuple(
+                    i for i, flag in enumerate(now_flags)
+                    if flag and not (i < len(before_flags) and before_flags[i])
+                )
+                changes.append((EventKind.CONTRACT_PROGRESS, terms, progress, done))
 
         # A completion or failure removes the contract from the active list;
         # a revert puts it back. Whatever active change remains is the
         # player accepting or cancelling contracts.
         unexplained_active = d_active + completed + failed - uncompleted - unfailed
         if unexplained_active > 0:
-            changes += [(EventKind.CONTRACT_ACCEPTED, terms, terms.advance)] * unexplained_active
+            changes += [(EventKind.CONTRACT_ACCEPTED, terms, terms.advance, ())] * unexplained_active
         elif unexplained_active < 0:
-            changes += [(EventKind.CONTRACT_CANCELLED, terms, terms.penalty)] * -unexplained_active
+            changes += [
+                (EventKind.CONTRACT_CANCELLED, terms, terms.penalty, ())
+            ] * -unexplained_active
     return changes
 
 
@@ -300,7 +449,7 @@ class VesselEconomics:
         name: Vessel name.
         launches: Number of launches that were not reverted.
         cost: Total funds charged at launch (negative).
-        recovered: Funds returned by recoveries and reverts (positive).
+        recovered: Funds returned by recoveries (positive).
     """
 
     name: str
@@ -324,10 +473,12 @@ class LedgerSummary:
 
     Attributes:
         contract_advances: Funds received when accepting contracts.
-        contract_rewards: Funds received when completing contracts.
+        contract_rewards: Funds received when completing contracts and
+            their objectives.
         contract_penalties: Funds lost to failures, cancellations and reverts.
-        launch_costs: Funds charged for launching vessels (negative).
-        recoveries: Funds recovered from vessels and reverted launches.
+        launch_costs: Funds charged for launching vessels, net of the
+            launches reverted (negative).
+        recoveries: Funds recovered from vessels.
         other: Funds changes that are neither contracts nor vessels.
         contract_science: Science earned from contracts.
         contract_reputation: Nominal reputation earned from contracts.
@@ -391,7 +542,7 @@ class LedgerSummary:
             BreakdownItem("contract_rewards", "Contract rewards", self.contract_rewards),
             BreakdownItem("contract_penalties", "Contract penalties", self.contract_penalties),
             BreakdownItem("launch_costs", "Vessel launches", self.launch_costs),
-            BreakdownItem("recoveries", "Recoveries and reverts", self.recoveries),
+            BreakdownItem("recoveries", "Recoveries", self.recoveries),
             BreakdownItem("other", "Other", self.other),
         ]
 
@@ -413,11 +564,12 @@ class LedgerSummary:
             kind = event.kind
             if kind is EventKind.CONTRACT_ACCEPTED:
                 totals["advances"] += funds
-            elif kind is EventKind.CONTRACT_COMPLETED:
+            elif kind in (EventKind.CONTRACT_COMPLETED, EventKind.CONTRACT_PROGRESS):
                 totals["rewards"] += funds
             elif kind.is_contract:
                 totals["penalties"] += funds
-            elif kind is EventKind.VESSEL_LAUNCHED:
+            elif kind in (EventKind.VESSEL_LAUNCHED, EventKind.LAUNCH_REVERTED):
+                # A revert gives the launch money back: it cancels the cost.
                 totals["launches"] += funds
             elif kind.is_vessel:
                 totals["recoveries"] += funds
@@ -429,18 +581,22 @@ class LedgerSummary:
                 totals["reputation"] += event.delta.reputation
 
             if kind.is_vessel:
+                # Several debris recovered at once share one event; the
+                # first name is enough to find the vessel they came from.
+                first_name = (event.vessel or "Unknown vessel").split(", ")[0]
                 stats = vessels.setdefault(
-                    event.vessel or "Unknown vessel",
+                    owner_vessel(first_name),
                     {"launches": 0, "cost": 0.0, "recovered": 0.0},
                 )
                 if kind is EventKind.VESSEL_LAUNCHED:
                     stats["launches"] += 1
                     stats["cost"] += funds
+                elif kind is EventKind.LAUNCH_REVERTED:
+                    # A revert cancels the launch: no flight, no cost.
+                    stats["launches"] -= 1
+                    stats["cost"] += funds
                 else:
                     stats["recovered"] += funds
-                    # A revert cancels the launch: it should not count as a flight.
-                    if kind is EventKind.LAUNCH_REVERTED:
-                        stats["launches"] -= 1
 
         per_vessel = sorted(
             (

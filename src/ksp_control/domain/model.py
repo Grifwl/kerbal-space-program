@@ -7,6 +7,7 @@ also makes them safe to share between the polling thread and the web thread.
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -166,6 +167,38 @@ def _clean(value: float, epsilon: float) -> float:
 
 
 @dataclass(frozen=True)
+class ParameterTerms:
+    """The rewards of one contract parameter (an objective of a contract).
+
+    Many contracts pay most of their money per objective rather than on
+    completion: tourism contracts, for instance, pay each tourist's
+    itinerary and each of its stops, while the contract itself pays 0.
+
+    Attributes:
+        title: Human readable objective.
+        funds: Funds paid when the objective is completed.
+        science: Science granted when the objective is completed.
+        reputation: Nominal reputation granted when it is completed.
+        optional: Whether the contract can complete without it.
+    """
+
+    title: str
+    funds: float = 0.0
+    science: float = 0.0
+    reputation: float = 0.0
+    optional: bool = False
+
+    @property
+    def reward(self) -> Resources:
+        """Resources received when completing the objective.
+
+        Returns:
+            The objective rewards.
+        """
+        return Resources(self.funds, self.science, self.reputation)
+
+
+@dataclass(frozen=True)
 class ContractTerms:
     """The economic terms of one contract.
 
@@ -186,6 +219,9 @@ class ContractTerms:
         science_completion: Science granted on completion.
         reputation_completion: Nominal reputation granted on completion.
         reputation_failure: Nominal reputation lost on failure, positive.
+        parameters: Every objective of the contract, nested ones included,
+            flattened depth-first. Their rewards are paid on top of the
+            contract's own completion reward.
     """
 
     contract_type: str
@@ -196,6 +232,19 @@ class ContractTerms:
     science_completion: float = 0.0
     reputation_completion: float = 0.0
     reputation_failure: float = 0.0
+    parameters: tuple[ParameterTerms, ...] = ()
+
+    @property
+    def key(self) -> str:
+        """Stable identifier of these terms, usable across program runs.
+
+        Titles repeat (KSP offers many "Ferry a VIP..." contracts), so the
+        key covers the whole terms, rewards and objectives included.
+
+        Returns:
+            A short hexadecimal digest.
+        """
+        return hashlib.sha1(repr(self).encode("utf-8")).hexdigest()[:16]
 
     @property
     def advance(self) -> Resources:
@@ -228,6 +277,39 @@ class ContractTerms:
             funds=-abs(self.funds_failure), reputation=-abs(self.reputation_failure)
         )
 
+    def objectives_paid(self, progress: tuple[bool, ...]) -> Resources:
+        """Rewards of the objectives already completed.
+
+        Args:
+            progress: Completion flag of each parameter, aligned with
+                ``parameters``. Missing flags count as not completed.
+
+        Returns:
+            The sum of the rewards of the completed objectives.
+        """
+        return sum(
+            (p.reward for p, done in zip(self.parameters, progress) if done), Resources()
+        )
+
+    def objectives_pending(self, progress: tuple[bool, ...]) -> Resources:
+        """Rewards of the mandatory objectives not completed yet.
+
+        Completing the contract implies completing all of them, so this is
+        what KSP still pays on top of the contract reward at completion.
+
+        Args:
+            progress: Completion flag of each parameter, aligned with
+                ``parameters``. Missing flags count as not completed.
+
+        Returns:
+            The sum of the rewards of the pending non-optional objectives.
+        """
+        flags = tuple(progress) + (False,) * (len(self.parameters) - len(progress))
+        return sum(
+            (p.reward for p, done in zip(self.parameters, flags) if not done and not p.optional),
+            Resources(),
+        )
+
 
 @dataclass(frozen=True)
 class ContractBook:
@@ -240,11 +322,31 @@ class ContractBook:
         active: Contracts accepted and in progress.
         completed: Contracts completed successfully.
         failed: Contracts that failed (deadline expired or explicitly failed).
+        active_progress: For each active contract (same order as
+            ``active``), the completion flag of each of its parameters.
+            Only active contracts carry progress: once a contract is
+            finished, KSP no longer reports its objectives reliably.
     """
 
     active: tuple[ContractTerms, ...] = ()
     completed: tuple[ContractTerms, ...] = ()
     failed: tuple[ContractTerms, ...] = ()
+    active_progress: tuple[tuple[bool, ...], ...] = ()
+
+    def progress_by_contract(self) -> dict[ContractTerms, list[tuple[bool, ...]]]:
+        """Objective progress of every active copy of each contract.
+
+        Returns:
+            For each active contract, the progress flags of every copy, the
+            most advanced copy first (the one most likely to finish first).
+        """
+        progress: dict[ContractTerms, list[tuple[bool, ...]]] = {}
+        for index, terms in enumerate(self.active):
+            flags = self.active_progress[index] if index < len(self.active_progress) else ()
+            progress.setdefault(terms, []).append(tuple(flags))
+        for copies in progress.values():
+            copies.sort(key=sum, reverse=True)
+        return progress
 
     def counts(self) -> tuple[Counter, Counter, Counter]:
         """Count how many times each contract appears in every group.
@@ -253,6 +355,28 @@ class ContractBook:
             Three ``Counter`` objects: active, completed and failed.
         """
         return Counter(self.active), Counter(self.completed), Counter(self.failed)
+
+    @property
+    def is_empty(self) -> bool:
+        """Whether there are no contracts at all in any group.
+
+        Returns:
+            True when active, completed and failed are all empty.
+        """
+        return not (self.active or self.completed or self.failed)
+
+    def same_as(self, other: "ContractBook") -> bool:
+        """Compare two books ignoring the order of the contracts.
+
+        Args:
+            other: The book to compare with.
+
+        Returns:
+            True when every group holds the same contracts.
+        """
+        return self.counts() == other.counts() and Counter(
+            zip(self.active, self.active_progress)
+        ) == Counter(zip(other.active, other.active_progress))
 
 
 @dataclass(frozen=True)
@@ -267,6 +391,13 @@ class GameSnapshot:
         active_vessel: Name of the active vessel, only meaningful in flight.
         contracts: Contract lists, or ``None`` when they could not be read
             (contract diffs are then skipped instead of being misread).
+        vessel_prelaunch: Whether the active vessel is sitting on the launch
+            pad or runway, not launched yet. KSP charges the vessel cost a
+            moment *after* the flight scene opens, so this is what lets a
+            late charge still be recognized as the launch cost.
+        vessels: Names of every vessel in the save, or ``None`` when they
+            cannot be read (kRPC 0.5.x only lists them in flight). Used to
+            recognize recoveries of non-active vessels during a flight.
     """
 
     taken_at: datetime
@@ -275,6 +406,8 @@ class GameSnapshot:
     resources: Resources
     active_vessel: str | None = None
     contracts: ContractBook | None = None
+    vessel_prelaunch: bool = False
+    vessels: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -322,6 +455,7 @@ class EventKind(str, Enum):
 
     CONTRACT_ACCEPTED = "contract_accepted"
     CONTRACT_COMPLETED = "contract_completed"
+    CONTRACT_PROGRESS = "contract_progress"
     CONTRACT_FAILED = "contract_failed"
     CONTRACT_CANCELLED = "contract_cancelled"
     CONTRACT_REVERTED = "contract_reverted"
@@ -364,6 +498,10 @@ class LedgerEvent:
         description: Human readable explanation (contract title, vessel...).
         delta: Change in funds, science and reputation caused by the event.
         vessel: Vessel involved, for vessel events.
+        contract: Key of the contract involved, for contract events. Only
+            used while running (not persisted with the event).
+        objectives: Indices of the contract objectives this event paid, for
+            ``CONTRACT_PROGRESS`` events. Only used while running.
     """
 
     occurred_at: datetime
@@ -372,3 +510,5 @@ class LedgerEvent:
     description: str
     delta: Resources = field(default_factory=Resources)
     vessel: str | None = None
+    contract: str | None = None
+    objectives: tuple[int, ...] = ()

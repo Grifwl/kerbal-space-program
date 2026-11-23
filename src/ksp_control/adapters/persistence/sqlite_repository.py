@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS events (
     vessel      TEXT
 );
 CREATE INDEX IF NOT EXISTS samples_taken_at ON samples (taken_at);
+CREATE TABLE IF NOT EXISTS paid_objectives (
+    contract    TEXT    NOT NULL,
+    objective   INTEGER NOT NULL,
+    PRIMARY KEY (contract, objective)
+);
 """
 
 
@@ -145,6 +150,37 @@ class SqliteEconomyRepository(EconomyRepositoryPort):
                     for e in events
                 ],
             )
+
+    def paid_objectives(self) -> set[tuple[str, int]]:
+        """Return the contract objectives known to be paid already.
+
+        Returns:
+            ``(contract key, objective index)`` pairs.
+        """
+        return {(row["contract"], row["objective"]) for row in self._query(
+            "SELECT contract, objective FROM paid_objectives"
+        )}
+
+    def add_paid_objectives(self, objectives: set[tuple[str, int]]) -> None:
+        """Remember contract objectives that have been paid.
+
+        Args:
+            objectives: ``(contract key, objective index)`` pairs.
+        """
+        with self._lock, self._conn:
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO paid_objectives (contract, objective) VALUES (?, ?)",
+                sorted(objectives),
+            )
+
+    def forget_contract_objectives(self, contract_key: str) -> None:
+        """Drop the paid objectives of a contract that is finished.
+
+        Args:
+            contract_key: Key of the contract.
+        """
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM paid_objectives WHERE contract = ?", (contract_key,))
 
     def list_events(self, limit: int | None = None) -> list[LedgerEvent]:
         """Return ledger events, newest first.

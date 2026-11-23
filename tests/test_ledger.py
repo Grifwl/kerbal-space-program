@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -13,6 +14,7 @@ from ksp_control.domain.model import (
     EventKind,
     GameScene,
     GameSnapshot,
+    ParameterTerms,
     Resources,
 )
 
@@ -32,6 +34,7 @@ def snap(
     completed: tuple = (),
     failed: tuple = (),
     contracts: bool = True,
+    vessel_prelaunch: bool = False,
 ) -> GameSnapshot:
     """Build a snapshot with sensible defaults.
 
@@ -46,6 +49,7 @@ def snap(
         completed: Completed contracts.
         failed: Failed contracts.
         contracts: Whether contracts were readable.
+        vessel_prelaunch: Whether the vessel is still on the pad.
 
     Returns:
         The snapshot.
@@ -57,6 +61,7 @@ def snap(
         resources=Resources(funds, science, reputation),
         active_vessel=vessel,
         contracts=ContractBook(active, completed, failed) if contracts else None,
+        vessel_prelaunch=vessel_prelaunch,
     )
 
 
@@ -142,6 +147,24 @@ def test_launch_is_charged_on_entering_flight(analyzer):
     assert events[0].vessel == "Kerbal X"
 
 
+def test_late_charge_on_the_pad_is_still_the_launch(analyzer):
+    """KSP may deduct the cost one reading after the flight scene opens."""
+    events = analyzer.compare(
+        snap(0, 100_000, scene=GameScene.FLIGHT, vessel="Kerbal X", vessel_prelaunch=True),
+        snap(1, 64_000, scene=GameScene.FLIGHT, vessel="Kerbal X", vessel_prelaunch=True),
+    )
+    assert kinds(events) == [EventKind.VESSEL_LAUNCHED]
+
+
+def test_expense_during_flight_is_not_a_launch(analyzer):
+    """Once the vessel has lifted off, a funds drop is something else."""
+    events = analyzer.compare(
+        snap(0, 100_000, scene=GameScene.FLIGHT, vessel="Kerbal X"),
+        snap(1, 90_000, scene=GameScene.FLIGHT, vessel="Kerbal X"),
+    )
+    assert kinds(events) == [EventKind.OTHER]
+
+
 def test_revert_to_editor_refunds_the_vessel(analyzer):
     """Flight -> editor with more funds is a reverted launch."""
     events = analyzer.compare(
@@ -219,6 +242,103 @@ def test_reverted_launch_does_not_count_as_flight():
         snap(2, 100_000, scene=GameScene.EDITOR_VAB),
     ]
     events = [e for a, b in zip(s, s[1:]) for e in analyzer.compare(a, b)]
+    summary = LedgerSummary.from_events(events)
+    (vessel,) = summary.vessels
+    assert (vessel.launches, vessel.cost, vessel.recovered, vessel.net) == (0, 0, 0, 0)
+    assert (summary.launch_costs, summary.recoveries) == (0, 0)
+
+
+# Tourism contract as seen in a real career: the contract itself pays 0,
+# each tourist's itinerary pays 9,750 and each stop on it pays 3,250.
+TOURISTS = ContractTerms(
+    "TourismContract", "Ferry two tourists", reputation_completion=18,
+    parameters=(
+        ParameterTerms("Itinerary of Hadpondo", funds=9_750),
+        ParameterTerms("Suborbital flight", funds=3_250),
+        ParameterTerms("Itinerary of Podtreya", funds=9_750),
+        ParameterTerms("Suborbital flight", funds=3_250),
+    ),
+)
+
+
+def test_objectives_completed_in_flight_are_contract_income(analyzer):
+    """Both tourists reach their suborbital stop: 2 x 3,250."""
+    flight = {"scene": GameScene.FLIGHT, "vessel": "Bus"}
+    before = snap(0, 345_220, **flight, active=(TOURISTS,))
+    after = snap(1, 351_720, **flight, active=(TOURISTS,))
+    before = _with_progress(before, (False, False, False, False))
+    after = _with_progress(after, (False, True, False, True))
+    events = analyzer.compare(before, after)
+    assert kinds(events) == [EventKind.CONTRACT_PROGRESS]
+    assert events[0].delta.funds == 6_500
+
+
+def test_completion_pays_pending_objectives_then_recovery(analyzer):
+    """Recovering the bus completes both itineraries and the contract."""
+    before = _with_progress(
+        snap(0, 351_720, 44, 81, scene=GameScene.FLIGHT, vessel="Bus", active=(TOURISTS,)),
+        (False, True, False, True),
+    )
+    after = snap(1, 378_553, 62.8, 99, completed=(TOURISTS,))
+    events = analyzer.compare(before, after)
+    assert kinds(events) == [EventKind.CONTRACT_COMPLETED, EventKind.VESSEL_RECOVERED]
+    assert events[0].delta == Resources(funds=19_500, reputation=18)
+    assert events[1].delta == Resources(funds=7_333, science=18.8)
+    summary = LedgerSummary.from_events(events)
+    assert summary.contract_rewards == 19_500
+
+
+def _with_progress(snapshot: GameSnapshot, flags: tuple[bool, ...]) -> GameSnapshot:
+    """Attach objective progress to the single active contract of a snapshot.
+
+    Args:
+        snapshot: Snapshot with exactly one active contract.
+        flags: Completion flag of each of its parameters.
+
+    Returns:
+        A copy of the snapshot carrying the progress.
+    """
+    book = snapshot.contracts
+    return replace(snapshot, contracts=replace(book, active_progress=(flags,)))
+
+
+def test_recovering_debris_in_flight_is_a_recovery(analyzer):
+    """A stage vanishes from the list and funds go up, without scene change."""
+    flight = {"scene": GameScene.FLIGHT, "vessel": "Kerbal X"}
+    before = replace(snap(0, 50_000, **flight), vessels=("Kerbal X", "Kerbal X Debris"))
+    after = replace(snap(1, 53_500, 2, 0, **flight), vessels=("Kerbal X",))
+    events = analyzer.compare(before, after)
+    assert kinds(events) == [EventKind.VESSEL_RECOVERED]
+    assert events[0].vessel == "Kerbal X Debris"
+    assert events[0].delta == Resources(funds=3_500, science=2)
+
+
+def test_owner_vessel_handles_localized_and_nested_debris():
+    """English suffix, Spanish prefix, repeated markers."""
+    from ksp_control.domain.ledger import owner_vessel
+
+    assert owner_vessel("Kerbal X Debris Debris") == "Kerbal X"
+    assert owner_vessel("Escombros de Escombros de Nave") == "Nave"
+    assert owner_vessel("Kerbal X") == "Kerbal X"
+
+
+def test_recovering_from_the_space_center_names_the_vessel(analyzer):
+    """kRPC 0.8 lists vessels outside flight too."""
+    before = replace(snap(0, 1_000), vessels=("A", "Escombros de A"))
+    after = replace(snap(1, 1_300), vessels=("A",))
+    (event,) = analyzer.compare(before, after)
+    assert (event.kind, event.vessel) == (EventKind.VESSEL_RECOVERED, "Escombros de A")
+
+
+def test_debris_recoveries_count_for_their_vessel(analyzer):
+    """The per-vessel table merges "X Debris" into "X"."""
+    s = [
+        snap(0, 100_000, scene=GameScene.EDITOR_VAB),
+        replace(snap(1, 60_000, scene=GameScene.FLIGHT, vessel="Kerbal X"),
+                vessels=("Kerbal X", "Kerbal X Debris")),
+        replace(snap(2, 64_000, scene=GameScene.FLIGHT, vessel="Kerbal X"),
+                vessels=("Kerbal X",)),
+    ]
+    events = [e for a, b in zip(s, s[1:]) for e in analyzer.compare(a, b)]
     (vessel,) = LedgerSummary.from_events(events).vessels
-    assert vessel.launches == 0
-    assert vessel.net == 0
+    assert (vessel.name, vessel.cost, vessel.recovered) == ("Kerbal X", -40_000, 4_000)
