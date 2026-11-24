@@ -23,6 +23,7 @@ dev = ["pytest>=8"]
 ksp-economy-monitor = "ksp_control.entrypoints.economy_monitor:main"
 ksp-recover = "ksp_control.entrypoints.recover_vessels:main"
 ksp-part-tests = "ksp_control.entrypoints.part_tests:main"
+ksp-tourism = "ksp_control.entrypoints.tourism:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

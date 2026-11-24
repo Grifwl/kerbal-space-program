@@ -16,6 +16,13 @@ from enum import Enum
 from ksp_control.domain.model import GameScene, GameSnapshot, LedgerEvent, ResourceSample
 from ksp_control.domain.part_tests import EditorState, FlightState, TestContract
 from ksp_control.domain.recovery import VesselReport
+from ksp_control.domain.tourism import (
+    ContractStatus,
+    EngineState,
+    FlightTelemetry,
+    Kerbal,
+    TourismContract,
+)
 
 
 class GameUnavailableError(RuntimeError):
@@ -304,6 +311,187 @@ class PartTestGamePort(ABC):
 
         Args:
             notice: The message.
+        """
+
+    @abstractmethod
+    def close(self) -> None:
+        """Release any connection held by the adapter."""
+
+
+class TourismGamePort(ABC):
+    """What the tourism campaign needs from the game.
+
+    Covers the space center side (funds, contracts, roster, launching) and
+    the flight side (telemetry and the few controls a suborbital hop
+    needs). Recovering vessels goes through ``FleetPort``.
+    """
+
+    # ---------------------------------------------------------- space center
+
+    @abstractmethod
+    def funds(self) -> float:
+        """Return the current funds balance.
+
+        Returns:
+            Funds.
+
+        Raises:
+            GameUnavailableError: When the game cannot be read.
+        """
+
+    @abstractmethod
+    def read_tourism_contracts(self) -> list[TourismContract]:
+        """Read the tourism contracts on offer and accepted.
+
+        Returns:
+            The contracts, with their tourists matched to the roster.
+
+        Raises:
+            GameUnavailableError: When the game cannot be read.
+        """
+
+    @abstractmethod
+    def accept_contract(self, contract_id: str) -> None:
+        """Accept an offered contract (returns without checking).
+
+        Args:
+            contract_id: Identifier from ``read_tourism_contracts``.
+
+        Raises:
+            GameUnavailableError: When the game refuses or cannot be reached.
+        """
+
+    @abstractmethod
+    def contract_status(self, contract_id: str) -> ContractStatus:
+        """Read the status of a contract seen earlier.
+
+        Args:
+            contract_id: Identifier from ``read_tourism_contracts``.
+
+        Returns:
+            Its current status.
+
+        Raises:
+            GameUnavailableError: When the game cannot be read.
+        """
+
+    @abstractmethod
+    def roster(self) -> list[Kerbal]:
+        """Read the astronaut roster.
+
+        Returns:
+            Every kerbal, hired or not.
+
+        Raises:
+            GameUnavailableError: When the game cannot be read.
+        """
+
+    @abstractmethod
+    def launch(self, craft: str, crew: list[str]) -> str:
+        """Launch a VAB craft from the launch pad with the given crew.
+
+        Blocks until the flight scene is loaded and the vessel is on the pad.
+
+        Args:
+            craft: Craft name as shown in the VAB.
+            crew: Kerbals to board, in seat order (the pilot first).
+
+        Returns:
+            The name of the launched vessel.
+
+        Raises:
+            GameUnavailableError: When the game refuses the launch.
+        """
+
+    # ---------------------------------------------------------------- flight
+
+    @abstractmethod
+    def read_flight(self) -> FlightTelemetry | None:
+        """Read the active vessel.
+
+        Returns:
+            Its telemetry, or ``None`` when there is no active vessel (the
+            game left the flight scene or the vessel was destroyed).
+
+        Raises:
+            GameUnavailableError: When the game cannot be read.
+        """
+
+    @abstractmethod
+    def read_engines(self) -> list[EngineState]:
+        """Read the engines of the active vessel.
+
+        Returns:
+            One entry per engine.
+        """
+
+    @abstractmethod
+    def parachutes_safe(self) -> bool:
+        """Tell whether the game rates a parachute safe to open now.
+
+        Returns:
+            True when at least one parachute of the vessel is safe.
+        """
+
+    @abstractmethod
+    def parachutes_open(self) -> bool:
+        """Tell whether a parachute of the vessel has opened.
+
+        Returns:
+            True when at least one is semi-deployed or deployed.
+        """
+
+    @abstractmethod
+    def has_control(self) -> bool:
+        """Tell whether the active vessel can be controlled.
+
+        Returns:
+            False when no pilot or probe core is in command.
+        """
+
+    @abstractmethod
+    def stage(self) -> None:
+        """Activate the next stage (like pressing space)."""
+
+    @abstractmethod
+    def set_throttle(self, value: float) -> None:
+        """Set the main throttle.
+
+        Args:
+            value: Between 0 and 1.
+        """
+
+    @abstractmethod
+    def point(self, pitch: float, heading: float) -> None:
+        """Hold a pitch and heading with the autopilot.
+
+        Args:
+            pitch: Degrees above the horizon.
+            heading: Compass degrees.
+        """
+
+    @abstractmethod
+    def hold_retrograde(self) -> None:
+        """Point the nose against the surface velocity (heat shield first)."""
+
+    @abstractmethod
+    def release_controls(self) -> None:
+        """Disengage the autopilot and leave the throttle at zero."""
+
+    @abstractmethod
+    def warp_to(self, ut: float) -> None:
+        """Time warp until a universal time (blocks).
+
+        Args:
+            ut: Universal time to reach.
+        """
+
+    @abstractmethod
+    def set_physics_warp(self, factor: int) -> None:
+        """Set the physics warp factor.
+
+        Args:
+            factor: 0 (normal speed) to 3 (4x).
         """
 
     @abstractmethod

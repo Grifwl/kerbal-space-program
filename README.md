@@ -194,6 +194,80 @@ code and localization and were checked on a Spanish game; English titles
 are recognized too. The speed is the surface speed, as KSP uses it for
 these windows in the atmosphere.
 
+## Suborbital tourism
+
+`ksp-tourism` earns funds with the "take tourists on a suborbital flight
+of Kerbin" contracts, in a loop, until the funds reach a target or no such
+contract is left:
+
+```powershell
+.venv\Scripts\ksp-tourism --craft "Passatgers v1.1" --target 500000 --dry-run
+.venv\Scripts\ksp-tourism --craft "Passatgers v1.1" --target 500000 --max-flights 1
+.venv\Scripts\ksp-tourism --craft "Passatgers v1.1" --target 500000
+```
+
+Each flight:
+
+1. **Chooses the contracts.** Only tourism contracts whose every tourist
+   wants nothing but a suborbital flight of Kerbin. Contracts already
+   accepted board first; the free seats (`--seats`, default 4, pilot not
+   included) are filled with the offers that seat the most tourists and
+   pay the most. Several contracts fly together. If KSP refuses an offer
+   (the Mission Control limit of active contracts), the flight goes with
+   what was accepted.
+2. **Launches the craft** from the launch pad with a pilot and the
+   tourists. Pilots take turns (every hired pilot, or the `--pilot` ones in
+   that order). The pilot is boarded first, so they sit in the first seat
+   of the craft file, normally the command pod.
+3. **Flies the hop**: full throttle with the autopilot, straight up for
+   the first kilometre and then turning gradually to the east, down to
+   `--pitch` (default 80 degrees) at 10 km (`--heading` for another
+   direction), so the capsule comes down in the sea instead of on the
+   space center: a near-vertical hop falls back almost where it started.
+   A lower pitch lands further away. A stage
+   is activated when every engine it drops has burnt out (boosters, side
+   engines) or when nothing is pushing; the parachute stage is never
+   activated on the way up. The engines are cut once the apoapsis passes
+   `--apoapsis` (default 75 km) and relit if drag pulls it down.
+   **Air limit**: while the dynamic pressure (thick air and high speed
+   together, what makes the air "boil" around the rocket) is above
+   `--max-q` (default 20 kPa, like MechJeb's "Limit Q"), the throttle is
+   lowered smoothly, down to `--min-throttle` (default 10%), and raised
+   again as the air thins. The drag is also kept below the weight
+   (`--max-drag`, default 1, i.e. no faster than terminal velocity), but a
+   heavy rocket's terminal velocity is about 500 m/s, so that one rarely
+   acts. Solid boosters cannot be throttled, so while they burn the limit
+   may be passed. `--max-q 0 --max-drag 0` disables both.
+4. **Above 70 km** the vessel is suborbital and the tourists' destination
+   is done. The stages above the parachutes are jettisoned, the capsule
+   turns its heat shield forward and time warp skips to the reentry.
+5. **Lands**: the parachute stage is activated when KSP rates a parachute
+   safe to open (or below 2 km anyway); the game then opens them when it
+   is safe. The autopilot keeps the heat shield forward until a canopy
+   really opens, then lets go, and physics warp runs under the canopies
+   (`--physics-warp`, `--no-warp`).
+6. **Recovers** the vessel and the pieces of it that landed (same rules as
+   `ksp-recover`, but only this craft and its debris; other landed vessels
+   are left alone). Recovering the tourists completes their contracts.
+
+The campaign stops, and asks you to look, when something does not go to
+plan: a contract that is not completed after the recovery, a flight that
+did not reach space, no pilot available, or a vessel lost. Ctrl+C stops it
+at any time; a vessel in flight is then yours.
+
+You may go on EVA or look at another vessel during a flight: while the
+rocket is not the active vessel the script waits and commands nothing
+(every control acts on the active vessel, so it would be steering the
+kerbal). It carries on when you switch back, so come back in time for
+the reentry and the parachutes. A first EVA also pays a milestone; the
+flight summary shows it under "recovery and other".
+
+The craft must have a probe core or a crewed command pod, parachutes in
+the last stage, and every decoupler in the stages above it. Run
+`--max-flights 1` the first time to check a new craft. Do not run
+`ksp-part-tests` with throttle control at the same time: both would
+command the throttle.
+
 ## Architecture
 
 ```
@@ -202,15 +276,18 @@ src/ksp_control/
 │   ├── model.py         Snapshots, contracts, resources, ledger events
 │   ├── ledger.py        Snapshot diff -> events; ledger summary
 │   ├── recovery.py      Recovery value estimate and recovery decisions
-│   └── part_tests.py    Part test requirements, flight plan, speed governor
+│   ├── part_tests.py    Part test requirements, flight plan, speed governor
+│   └── tourism.py       Tourism contract choice, pilot turns, ascent rules
 ├── application/         Use cases + ports
 │   ├── ports.py         GameTelemetryPort, EconomyRepositoryPort, FleetPort,
-│   │                    PartTestGamePort
+│   │                    PartTestGamePort, TourismGamePort
 │   ├── economy_monitor.py
 │   ├── vessel_recovery.py
-│   └── part_test_assistant.py
+│   ├── part_test_assistant.py
+│   ├── suborbital_flight.py   Flies a suborbital hop and lands it
+│   └── tourism_campaign.py    Contracts -> launch -> flight -> recovery loop
 ├── adapters/
-│   ├── game/            kRPC telemetry, fleet and part tests; contract text
+│   ├── game/            kRPC telemetry, fleet, part tests and tourism; contract text
 │   │                    parsing; simulated telemetry
 │   ├── persistence/     sqlite_repository.py
 │   ├── polling.py       Background loop (driving adapter)
