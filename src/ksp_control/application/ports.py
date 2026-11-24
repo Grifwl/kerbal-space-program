@@ -9,9 +9,12 @@ library.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 
 from ksp_control.domain.model import GameScene, GameSnapshot, LedgerEvent, ResourceSample
+from ksp_control.domain.part_tests import EditorState, FlightState, TestContract
 from ksp_control.domain.recovery import VesselReport
 
 
@@ -187,6 +190,120 @@ class FleetPort(ABC):
 
         Raises:
             GameUnavailableError: When the game refuses or cannot be reached.
+        """
+
+    @abstractmethod
+    def close(self) -> None:
+        """Release any connection held by the adapter."""
+
+
+class NoticeLevel(Enum):
+    """What a message means to the player; adapters pick the colour."""
+
+    SUCCESS = "success"  # something was achieved (green)
+    ACTION = "action"    # the player has to do something now (yellow)
+    INFO = "info"        # for information (white)
+    WARNING = "warning"  # a problem (orange)
+    ERROR = "error"      # something is missing or wrong (red)
+
+
+class NoticePlacement(Enum):
+    """Where a message is shown."""
+
+    BANNER = "banner"  # large, centred: needs attention now
+    SIDE = "side"      # small, at the side of the screen: background info
+
+
+@dataclass(frozen=True)
+class Notice:
+    """A message for the player.
+
+    Attributes:
+        text: The message.
+        level: Its meaning.
+        placement: Where to show it.
+        duration: Seconds on screen.
+    """
+
+    text: str
+    level: NoticeLevel = NoticeLevel.INFO
+    placement: NoticePlacement = NoticePlacement.SIDE
+    duration: float = 6.0
+
+
+class PartTestGamePort(ABC):
+    """What the part test assistant needs from the game."""
+
+    @abstractmethod
+    def read_test_contracts(self) -> list[TestContract]:
+        """Read the active part test contracts and their live progress.
+
+        Returns:
+            The contracts; empty outside a career game.
+
+        Raises:
+            GameUnavailableError: When the game cannot be read.
+        """
+
+    @abstractmethod
+    def contract_state(self, contract_id: str) -> str | None:
+        """Tell what happened to a contract that is no longer active.
+
+        Args:
+            contract_id: Identifier from ``read_test_contracts``.
+
+        Returns:
+            ``"completed"``, ``"failed"``, ``"cancelled"``... or ``None``
+            when unknown.
+        """
+
+    @abstractmethod
+    def read_flight(self) -> FlightState | None:
+        """Read the active vessel.
+
+        Returns:
+            Its state, or ``None`` outside the flight scene.
+
+        Raises:
+            GameUnavailableError: When the game cannot be read.
+        """
+
+    @abstractmethod
+    def read_editor(self) -> EditorState | None:
+        """Read the craft being designed.
+
+        Returns:
+            The craft, or ``None`` outside the VAB and the SPH.
+
+        Raises:
+            GameUnavailableError: When the game cannot be read.
+        """
+
+    @abstractmethod
+    def set_throttle(self, value: float) -> None:
+        """Set the active vessel's main throttle.
+
+        Args:
+            value: Between 0 and 1.
+        """
+
+    @abstractmethod
+    def run_test(self, part_title: str) -> bool:
+        """Press "Run Test" on a part of the active vessel.
+
+        Args:
+            part_title: Title of the part.
+
+        Returns:
+            True when a part offered the action and it was triggered.
+        """
+
+    @abstractmethod
+    def show(self, notice: Notice) -> None:
+        """Show a message on the game screen.
+
+        Args:
+            notice: The message.
         """
 
     @abstractmethod

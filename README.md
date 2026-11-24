@@ -135,6 +135,65 @@ part way (with kRPC 0.5.x every recovery did).
 The economy monitor recognizes these recoveries. Debris (`"X Debris"`,
 `"Escombros de X"`) counts towards the vessel it came from.
 
+## Part test assistant
+
+`ksp-part-tests` helps with the "test a part" contracts ("Test X flying
+over Kerbin at 2-8 km and 140-270 m/s"). Start it once per game session and
+leave it running in its own terminal: it waits for the game, follows every
+flight and reconnects if KSP or the kRPC server restarts.
+
+```powershell
+.venv\Scripts\ksp-part-tests                            # full assistance
+.venv\Scripts\ksp-part-tests --no-throttle --no-run-test # messages only
+```
+
+While you design a craft in the VAB or the SPH, it warns (small, red, on
+the side) about every pending test whose part is not on the craft: when you
+enter the editor, whenever the list changes and every 30 seconds. Adding the
+part is confirmed in green.
+
+During a flight it:
+
+- **plans the pending tests** and shows the plan on the side of the screen
+  when the flight starts. Tests are ordered along the flight profile
+  (launch pad, climb by altitude window, space, landing). Tests whose
+  windows overlap are done at the same moment. The plan marks what needs
+  another flight: a different body, a second touchdown, or a second
+  staging test of the same part when only one copy is on board (staging
+  uses it up). A missing part gets a small red warning on the side, only
+  while on the launch pad: once flying, contracts for parts the vessel
+  does not carry are left for other flights and stay silent;
+- **holds the speed window with the throttle** while climbing towards a
+  test with a speed range, aiming at 40% of the range (`--speed-aim`). It
+  never touches the throttle when descending. Moving the throttle by hand
+  gives control back to you for that test. Solid boosters cannot be
+  throttled; you are warned if they push the speed over the limit;
+- **announces the test altitude** with a banner when the vessel enters the
+  altitude window. The banner is yellow when you will have to act;
+- **acts when every condition holds**, according to the game itself (the
+  contract's sub-objectives):
+  - "Run Test" from the part's menu: the assistant presses it and reports
+    the completion in green;
+  - activate through the staging sequence: a yellow **STAGE NOW** banner
+    repeats while you are in the window, and you press space;
+  - tests with only a place and no altitude or speed window (on the launch
+    pad, landed, splashed down, in orbit...) work the same way: the banner
+    says where you are ("STAGE NOW: ... - on the launch pad");
+  - "have the part" (haul) objectives: nothing to do, the completion is
+    reported in green.
+
+Only tests at Kerbin are assisted. Tests at other bodies usually need
+transfers or particular orbits first, so the assistant leaves them to you
+entirely, even when you are there: no throttle, no Run Test, no messages
+(the editor still warns about their missing parts).
+
+Contract objectives are only available as text, so the assistant reads the
+conditions from the objective titles (`"Alt: 2,000m a 8,000m"`,
+`"Vel: 140.0m/s a 270.0m/s"`, `"Volando"`...). The formats come from KSP's
+code and localization and were checked on a Spanish game; English titles
+are recognized too. The speed is the surface speed, as KSP uses it for
+these windows in the atmosphere.
+
 ## Architecture
 
 ```
@@ -142,13 +201,17 @@ src/ksp_control/
 ├── domain/              Pure model and rules (no I/O)
 │   ├── model.py         Snapshots, contracts, resources, ledger events
 │   ├── ledger.py        Snapshot diff -> events; ledger summary
-│   └── recovery.py      Recovery value estimate and recovery decisions
+│   ├── recovery.py      Recovery value estimate and recovery decisions
+│   └── part_tests.py    Part test requirements, flight plan, speed governor
 ├── application/         Use cases + ports
-│   ├── ports.py         GameTelemetryPort, EconomyRepositoryPort, FleetPort
+│   ├── ports.py         GameTelemetryPort, EconomyRepositoryPort, FleetPort,
+│   │                    PartTestGamePort
 │   ├── economy_monitor.py
-│   └── vessel_recovery.py
+│   ├── vessel_recovery.py
+│   └── part_test_assistant.py
 ├── adapters/
-│   ├── game/            kRPC telemetry and fleet, simulated telemetry
+│   ├── game/            kRPC telemetry, fleet and part tests; contract text
+│   │                    parsing; simulated telemetry
 │   ├── persistence/     sqlite_repository.py
 │   ├── polling.py       Background loop (driving adapter)
 │   └── web/             Flask API + static dashboard (driving adapter)
