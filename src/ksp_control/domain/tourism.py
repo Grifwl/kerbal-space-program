@@ -4,10 +4,13 @@ A tourism contract carries one or more tourists, each with an itinerary of
 destinations ("Suborbital spaceflight at Kerbin", "Flyby of the Mun"...).
 The tourism campaign only takes contracts whose every destination can be
 reached by a suborbital hop from the launch pad and packs as many tourists
-as fit in the craft. This module decides:
+as fit in the craft. KSP pays and completes each tourist's itinerary on its
+own, when that tourist is recovered, so a contract with more tourists than
+seats is flown over several flights. This module decides:
 
 * which contracts a suborbital hop satisfies;
-* which contracts to fly next (already accepted first, then offers);
+* which tourists fly next (accepted contracts first, then offers), splitting
+  a contract between flights when it does not fit;
 * which pilot flies next (rotation);
 * when to stage during the ascent and how to throttle towards the target
   apoapsis.
@@ -65,11 +68,17 @@ class Tourist:
         itinerary: Title of the tourist's objective ("Samroda's itinerary").
         destinations: Titles of the places the tourist wants to visit.
         kerbal: Full roster name of the tourist, when it could be matched.
+        reward: Funds paid when the itinerary is completed (the objective
+            and its destinations).
+        completed: Whether the itinerary is already completed, i.e. the
+            tourist already flew and was recovered.
     """
 
     itinerary: str
     destinations: tuple[str, ...]
     kerbal: str | None = None
+    reward: float = 0.0
+    completed: bool = False
 
 
 @dataclass(frozen=True)
@@ -78,9 +87,10 @@ class TourismContract:
 
     Attributes:
         contract_id: Identifier valid for the adapter that read it.
-        title: Contract title.
+        title: Contract title. KSP gives most tourism contracts the same
+            title ("Take two tourists..."), so it does not identify one.
         status: Life-cycle status.
-        tourists: The tourists to fly.
+        tourists: Every tourist of the contract, flown or not.
         reward: Funds paid in total (advance, objectives and completion).
     """
 
@@ -91,13 +101,49 @@ class TourismContract:
     reward: float = 0.0
 
     @property
-    def seats(self) -> int:
-        """Seats needed to fly every tourist of the contract at once.
+    def pending(self) -> tuple[Tourist, ...]:
+        """Tourists still waiting for their flight.
 
         Returns:
-            Number of tourists.
+            The tourists whose itinerary is not completed, in order.
         """
-        return len(self.tourists)
+        return tuple(t for t in self.tourists if not t.completed)
+
+    @property
+    def seats(self) -> int:
+        """Seats needed to fly every pending tourist at once.
+
+        It may be more than the craft has: the contract is then flown over
+        several flights.
+
+        Returns:
+            Number of pending tourists.
+        """
+        return len(self.pending)
+
+    @property
+    def bonus(self) -> float:
+        """Funds of the contract itself, beyond the tourists' itineraries.
+
+        It is the advance (paid on acceptance) plus the completion reward
+        (paid when the last tourist is delivered).
+
+        Returns:
+            The reward not tied to any single tourist; never negative.
+        """
+        return max(0.0, self.reward - sum(t.reward for t in self.tourists))
+
+    def describe(self) -> str:
+        """Short text naming the contract by its tourists.
+
+        Titles are shared by many contracts, so the tourists' names are
+        what tells them apart in the logs.
+
+        Returns:
+            E.g. ``"2 tourist(s): Samroda Kerman, Robala Kerman"``.
+        """
+        names = ", ".join(t.kerbal or t.itinerary for t in self.tourists)
+        return f"{len(self.tourists)} tourist(s): {names}"
 
 
 @dataclass(frozen=True)
@@ -118,16 +164,78 @@ class Kerbal:
 
 
 @dataclass(frozen=True)
-class PassengerPlan:
-    """The contracts flown on the next flight.
+class Boarding:
+    """The tourists of one contract that board the next flight.
 
     Attributes:
-        carry: Contracts already accepted whose tourists board this flight.
-        accept: Offered contracts to accept now and fly this flight.
+        contract: The contract.
+        tourists: The tourists flying now; the contract's other pending
+            tourists wait for a later flight.
     """
 
-    carry: tuple[TourismContract, ...] = ()
-    accept: tuple[TourismContract, ...] = ()
+    contract: TourismContract
+    tourists: tuple[Tourist, ...]
+
+    @property
+    def completes_contract(self) -> bool:
+        """Whether this flight delivers every tourist the contract has left.
+
+        Returns:
+            True when nobody of the contract is left waiting.
+        """
+        return len(self.tourists) >= self.contract.seats
+
+    @property
+    def waiting(self) -> int:
+        """Tourists of the contract left for a later flight.
+
+        Returns:
+            Number of pending tourists not boarding now.
+        """
+        return max(0, self.contract.seats - len(self.tourists))
+
+    @property
+    def left_behind(self) -> tuple[Tourist, ...]:
+        """Pending tourists of the contract that do not board this flight.
+
+        Returns:
+            The tourists waiting for a later flight, in order.
+        """
+        return tuple(t for t in self.contract.pending if t not in self.tourists)
+
+    @property
+    def reward(self) -> float:
+        """Funds this flight earns from the contract.
+
+        Returns:
+            The itineraries of the tourists on board, plus the contract's
+            own reward when the flight completes it.
+        """
+        own = self.contract.bonus if self.completes_contract else 0.0
+        return sum(t.reward for t in self.tourists) + own
+
+
+@dataclass(frozen=True)
+class PassengerPlan:
+    """The tourists flown on the next flight.
+
+    Attributes:
+        carry: Tourists of contracts already accepted.
+        accept: Offered contracts to accept now, with the tourists of each
+            that fly this flight.
+    """
+
+    carry: tuple[Boarding, ...] = ()
+    accept: tuple[Boarding, ...] = ()
+
+    @property
+    def boardings(self) -> tuple[Boarding, ...]:
+        """Every contract of the flight with its tourists on board.
+
+        Returns:
+            Accepted contracts first, then the offers to accept.
+        """
+        return self.carry + self.accept
 
     @property
     def contracts(self) -> tuple[TourismContract, ...]:
@@ -136,7 +244,16 @@ class PassengerPlan:
         Returns:
             Accepted contracts first, then the offers to accept.
         """
-        return self.carry + self.accept
+        return tuple(b.contract for b in self.boardings)
+
+    @property
+    def tourists(self) -> tuple[Tourist, ...]:
+        """Every tourist on board, in boarding order.
+
+        Returns:
+            The tourists.
+        """
+        return tuple(t for b in self.boardings for t in b.tourists)
 
     @property
     def seats_used(self) -> int:
@@ -145,25 +262,25 @@ class PassengerPlan:
         Returns:
             Number of tourists.
         """
-        return sum(c.seats for c in self.contracts)
+        return len(self.tourists)
 
     @property
     def reward(self) -> float:
-        """Funds the plan pays when every contract is completed.
+        """Funds the flight earns when every tourist on board is delivered.
 
         Returns:
-            Total reward.
+            Total reward of this flight.
         """
-        return sum(c.reward for c in self.contracts)
+        return sum(b.reward for b in self.boardings)
 
     @property
     def is_empty(self) -> bool:
         """Whether there is nobody to fly.
 
         Returns:
-            True when the plan has no contract.
+            True when no tourist boards.
         """
-        return not self.contracts
+        return not self.tourists
 
 
 def is_suborbital_destination(title: str, body: str = "Kerbin") -> bool:
@@ -229,17 +346,27 @@ def match_kerbal(itinerary: str, roster_names: list[str]) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def _boardable(contract: TourismContract, available: set[str]) -> bool:
-    """Tell whether every tourist of an accepted contract can board now.
+def _board_offers(combo: tuple[TourismContract, ...], free: int) -> tuple[Boarding, ...]:
+    """Seat the tourists of a set of offers.
+
+    Smaller contracts board first, so that whole contracts fly together and
+    at most the last one is split, its remaining tourists waiting for a
+    later flight.
 
     Args:
-        contract: An active contract.
-        available: Full names of the kerbals available at the space center.
+        combo: Offers to accept.
+        free: Seats available for them.
 
     Returns:
-        True when all its tourists were matched and are available.
+        One boarding per offer that gets at least one seat.
     """
-    return all(t.kerbal is not None and t.kerbal in available for t in contract.tourists)
+    boardings = []
+    for contract in sorted(combo, key=lambda c: c.seats):
+        take = contract.pending[:free]
+        if take:
+            boardings.append(Boarding(contract, take))
+            free -= len(take)
+    return tuple(boardings)
 
 
 def plan_passengers(
@@ -250,13 +377,22 @@ def plan_passengers(
     allow_offers: bool = True,
     max_offers_considered: int = 16,
 ) -> PassengerPlan:
-    """Choose the contracts to fly on the next suborbital hop.
+    """Choose the tourists to fly on the next suborbital hop.
 
-    Contracts already accepted come first, in order, as long as they fit:
-    their tourists are waiting and their deadlines run. The seats left are
-    filled with offers, picking the combination that seats the most
-    tourists and, among those, pays the most. Offers are few (a handful at
-    a time), so trying every combination is cheap.
+    Tourists of contracts already accepted come first: they are waiting and
+    their deadlines run. Contracts with fewer tourists left go first, so
+    contracts are finished (and stop counting against the Mission Control
+    limit) as soon as possible; a contract that does not fit is split, the
+    rest of its tourists flying on the next flights.
+
+    The seats left are filled with offers. Every combination of offers is
+    scored by, in order: the seats it fills on this flight, the funds this
+    flight earns from them, and the fewest tourists left waiting for a
+    later flight. An offer bigger than the free seats is therefore taken
+    when it pays better per seat: the tourists left behind cost nothing,
+    they board first on the next flight and are paid then. Between equally
+    paying choices, the one that fits exactly wins. Offers are few (a
+    handful at a time), so trying every combination is cheap.
 
     Args:
         contracts: Tourism contracts, offered and active.
@@ -269,34 +405,46 @@ def plan_passengers(
     Returns:
         The plan; empty when nothing can be flown.
     """
-    hops = [c for c in contracts if is_suborbital_hop(c, body)]
+    hops = [c for c in contracts if c.seats > 0 and is_suborbital_hop(c, body)]
 
-    carry: list[TourismContract] = []
+    carry: list[Boarding] = []
     free = seats
-    for contract in hops:
-        if contract.status is ContractStatus.ACTIVE and _boardable(contract, available):
-            if 0 < contract.seats <= free:
-                carry.append(contract)
-                free -= contract.seats
+    # sorted() is stable: equal sizes keep the game's order (oldest first).
+    active = sorted((c for c in hops if c.status is ContractStatus.ACTIVE), key=lambda c: c.seats)
+    for contract in active:
+        # A tourist that was not matched to the roster, or is not at the
+        # space center, cannot be boarded; the others of the contract can.
+        boardable = tuple(t for t in contract.pending
+                          if t.kerbal is not None and t.kerbal in available)
+        take = boardable[:free]
+        if take:
+            carry.append(Boarding(contract, take))
+            free -= len(take)
 
-    accept: tuple[TourismContract, ...] = ()
-    offers = [c for c in hops if c.status is ContractStatus.OFFERED and 0 < c.seats <= free]
+    accept: tuple[Boarding, ...] = ()
+    offers = [c for c in hops if c.status is ContractStatus.OFFERED]
     if allow_offers and offers and free > 0:
         offers.sort(key=lambda c: c.reward / c.seats, reverse=True)
         offers = offers[:max_offers_considered]
-        best: tuple[int, float] = (0, 0.0)
+        best: tuple[int, float, int] | None = None
         # Smaller combinations are tried first and only a strictly better
-        # score replaces the best one, so among equal (seats, reward) the
-        # plan with fewer contracts wins (fewer acceptances to go wrong).
+        # score replaces the best one, so among equal scores the plan with
+        # fewer contracts wins (fewer acceptances to go wrong).
         for size in range(1, len(offers) + 1):
             for combo in itertools.combinations(offers, size):
-                used = sum(c.seats for c in combo)
-                if used > free:
+                wanted = sum(c.seats for c in combo)
+                # The biggest contract boards last: if the others already
+                # take every seat it gets none, and the same combination
+                # without it scores better (fewer tourists left waiting).
+                if wanted - max(c.seats for c in combo) >= free:
                     continue
-                score = (used, sum(c.reward for c in combo))
-                if score > best:
-                    best, accept = score, combo
-    return PassengerPlan(carry=tuple(carry), accept=tuple(accept))
+                boardings = _board_offers(combo, free)
+                filled = sum(len(b.tourists) for b in boardings)
+                # filled - wanted is minus the tourists left waiting.
+                score = (filled, sum(b.reward for b in boardings), filled - wanted)
+                if best is None or score > best:
+                    best, accept = score, boardings
+    return PassengerPlan(carry=tuple(carry), accept=accept)
 
 
 def choose_pilot(roster: list[Kerbal], flight_number: int, preferred: tuple[str, ...] = ()) -> str | None:

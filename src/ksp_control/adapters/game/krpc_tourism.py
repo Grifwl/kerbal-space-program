@@ -6,7 +6,9 @@ Spanish game):
 * Tourism contracts are ``FinePrint.Contracts.TourismContract``. Each
   top-level objective is one tourist's itinerary ("Itinerario de viaje de
   Samroda") and its children are the destinations ("Vuelo espacial
-  suborbital en Kerbin").
+  suborbital en Kerbin"). The rewards sit on the itineraries and their
+  destinations (e.g. 9,750 + 3,250 for a 13,000 tourist); the contract's own
+  advance and completion rewards are zero.
 * The tourists of an *offered* contract already exist in the roster, as
   type ``unowned`` and status ``assigned``; accepting the contract makes
   them ``tourist`` and ``available``.
@@ -170,11 +172,16 @@ class KrpcTourismGame(TourismGamePort):
                 contract_id = str(getattr(remote, "_object_id", id(remote)))
                 self._contracts[contract_id] = remote
                 itineraries = list(remote.parameters)
+                # Each itinerary is completed (and paid) on its own, when its
+                # tourist is recovered: that is what lets a contract with
+                # more tourists than seats be flown over several flights.
                 tourists = tuple(
                     Tourist(
                         itinerary=str(itinerary.title),
                         destinations=tuple(str(d.title) for d in itinerary.children),
                         kerbal=match_kerbal(str(itinerary.title), tourist_names),
+                        reward=_total_funds([itinerary]),
+                        completed=bool(itinerary.completed),
                     )
                     for itinerary in itineraries
                 )

@@ -111,10 +111,12 @@ def format_summary(summary: FlightSummary) -> str:
         A text line.
     """
     report = summary.report
+    waiting = f", {summary.waiting} waiting for a later flight" if summary.waiting else ""
     return (
         f"Flight {summary.number} ({summary.pilot}): {report.situation} after "
-        f"{report.max_altitude:,.0f} m; {summary.completed}/{len(summary.contracts)} "
-        f"contract(s) completed. Launch -{summary.launch_cost:,.0f}, contracts "
+        f"{report.max_altitude:,.0f} m; {summary.delivered}/{summary.tourists} tourist(s) "
+        f"delivered, {summary.completed}/{len(summary.contracts)} contract(s) completed"
+        f"{waiting}. Launch -{summary.launch_cost:,.0f}, contracts "
         f"+{summary.contract_rewards:,.0f}, recovery and other {summary.vessel_recovery:+,.0f}: "
         f"net {summary.net:+,.0f}; funds {summary.funds:,.0f}"
     )
@@ -225,7 +227,8 @@ def _dry_run(game: KrpcTourismGame, campaign: TourismCampaign, options: Campaign
         print(f"  [{contract.status.value}] {contract.title} - {tourists} - "
               f"{contract.reward:,.0f} funds")
         for tourist in contract.tourists:
-            print(f"      {tourist.itinerary}: {'; '.join(tourist.destinations)}")
+            done = " (delivered)" if tourist.completed else ""
+            print(f"      {tourist.itinerary}{done}: {'; '.join(tourist.destinations)}")
     plan = campaign.next_plan()
     if plan.is_empty:
         print("Next flight: nothing to fly.")
@@ -233,10 +236,11 @@ def _dry_run(game: KrpcTourismGame, campaign: TourismCampaign, options: Campaign
     pilot = choose_pilot(game.roster(), 0, options.pilots)
     print(f"Next flight: pilot {pilot or '(none available!)'}, "
           f"{plan.seats_used}/{options.seats} seat(s), {plan.reward:,.0f} funds")
-    for contract in plan.carry:
-        print(f"  already accepted: {contract.title}")
-    for contract in plan.accept:
-        print(f"  to accept:        {contract.title}")
+    for label, boardings in (("already accepted", plan.carry), ("to accept", plan.accept)):
+        for boarding in boardings:
+            names = ", ".join(t.kerbal or t.itinerary for t in boarding.tourists)
+            later = f" ({boarding.waiting} more on later flights)" if boarding.waiting else ""
+            print(f"  {label + ':':<18}{names}{later}")
     return 0
 
 

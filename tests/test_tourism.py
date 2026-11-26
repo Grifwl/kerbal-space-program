@@ -41,23 +41,40 @@ SUBORBITAL = "Vuelo espacial suborbital en Kerbin"
 
 
 def contract(cid: str, names: list[str], status=ContractStatus.OFFERED, reward=None,
-             destinations=(SUBORBITAL,)) -> TourismContract:
+             destinations=(SUBORBITAL,), delivered=()) -> TourismContract:
     """Build a tourism contract whose tourists all share the destinations.
+
+    Like in the game, the rewards sit on the tourists' itineraries.
 
     Args:
         cid: Contract id.
         names: Full names of the tourists.
         status: Contract status.
-        reward: Total reward (default: 13,000 per tourist).
+        reward: Total reward (default: 13,000 per tourist), split evenly
+            between the tourists.
         destinations: Destinations of every tourist.
+        delivered: Names of the tourists whose itinerary is completed.
 
     Returns:
         The contract.
     """
-    tourists = tuple(Tourist(f"Itinerario de viaje de {n.split()[0]}", tuple(destinations), n)
+    total = 13_000.0 * len(names) if reward is None else reward
+    each = total / len(names) if names else 0.0
+    tourists = tuple(Tourist(f"Itinerario de viaje de {n.split()[0]}", tuple(destinations), n,
+                             reward=each, completed=n in delivered)
                      for n in names)
-    return TourismContract(cid, f"Contract {cid}", status, tourists,
-                           13_000.0 * len(names) if reward is None else reward)
+    return TourismContract(cid, f"Contract {cid}", status, tourists, total)
+
+
+def ids(boardings) -> list[str]:
+    """Contract ids of some boardings, in order."""
+    return [b.contract.contract_id for b in boardings]
+
+
+def five() -> list[str]:
+    """The tourists of the five-tourist offer seen in the real game."""
+    return ["Ribelia Kerman", "Munmoro Kerman", "Shernando Kerman", "Lubera Kerman",
+            "Chutona Kerman"]
 
 
 # ------------------------------------------------------------------ domain
@@ -85,7 +102,7 @@ def test_plan_fills_the_seats_with_the_best_offers():
     contracts = [contract("vip", ["A Kerman"]), contract("p1", ["B Kerman", "C Kerman"]),
                  contract("p2", ["D Kerman", "E Kerman"])]
     plan = plan_passengers(contracts, seats=4, available=set())
-    assert {c.contract_id for c in plan.accept} == {"p1", "p2"}
+    assert set(ids(plan.accept)) == {"p1", "p2"}
     assert plan.seats_used == 4 and plan.reward == 52_000
 
 
@@ -96,9 +113,12 @@ def test_plan_carries_accepted_contracts_first():
                  contract("p2", ["D Kerman", "E Kerman"]),
                  contract("moon", ["F Kerman"], destinations=("Sobrevuelo de Mun",))]
     plan = plan_passengers(contracts, seats=4, available={"A Kerman"})
-    assert [c.contract_id for c in plan.carry] == ["act"]
-    assert [c.contract_id for c in plan.accept] in (["p1"], ["p2"])
-    assert plan.seats_used == 3
+    assert ids(plan.carry) == ["act"]
+    # Three seats left: a pair whole, and one of the other pair, whose
+    # second tourist flies on the next flight.
+    assert ids(plan.accept) == ["p1", "p2"]
+    assert [b.waiting for b in plan.accept] == [0, 1]
+    assert plan.seats_used == 4
 
 
 def test_plan_skips_accepted_contracts_whose_tourists_cannot_board():
@@ -106,6 +126,71 @@ def test_plan_skips_accepted_contracts_whose_tourists_cannot_board():
     contracts = [contract("act", ["A Kerman"], ContractStatus.ACTIVE)]
     assert plan_passengers(contracts, seats=4, available=set()).is_empty
     assert plan_passengers(contracts, seats=4, available={"A Kerman"}, allow_offers=False).carry
+
+
+def test_plan_accepts_an_offer_bigger_than_the_craft():
+    """Five tourists and four seats: four fly now, one waits."""
+    plan = plan_passengers([contract("five", five())], seats=4, available=set())
+    assert ids(plan.accept) == ["five"]
+    boarding = plan.accept[0]
+    assert [t.kerbal for t in boarding.tourists] == five()[:4]
+    assert boarding.waiting == 1 and not boarding.completes_contract
+    assert [t.kerbal for t in boarding.left_behind] == ["Chutona Kerman"]
+    # Only the itineraries of the tourists on board are paid this flight.
+    assert plan.reward == 4 * 13_000
+
+
+def test_plan_splits_an_offer_that_pays_more_per_seat():
+    """Seen in the game: five tourists at 19,500 beat two pairs at 13,000."""
+    contracts = [contract("pair1", ["A Kerman", "B Kerman"]),
+                 contract("pair2", ["C Kerman", "D Kerman"]),
+                 contract("five", five(), reward=97_500)]
+    plan = plan_passengers(contracts, seats=4, available=set())
+    assert ids(plan.accept) == ["five"]
+    assert plan.reward == 4 * 19_500 and plan.accept[0].waiting == 1
+
+
+def test_plan_prefers_offers_that_fit_when_they_pay_the_same():
+    """Splitting is only chosen when it fills more seats or pays more."""
+    contracts = [contract("five", five()), contract("pair1", ["A Kerman", "B Kerman"]),
+                 contract("pair2", ["C Kerman", "D Kerman"])]
+    plan = plan_passengers(contracts, seats=4, available=set())
+    assert set(ids(plan.accept)) == {"pair1", "pair2"}
+    # One pair and the big one: the pair boards whole, the big one is split.
+    plan = plan_passengers(contracts[:2], seats=4, available=set())
+    assert ids(plan.accept) == ["five"]  # four seats filled beat two
+    # A pair and a trio: the pair boards whole, two of the trio join it.
+    trio = contract("trio", ["E Kerman", "F Kerman", "G Kerman"])
+    plan = plan_passengers([trio, contracts[1]], seats=4, available=set())
+    assert ids(plan.accept) == ["pair1", "trio"]
+    assert [b.waiting for b in plan.accept] == [0, 1]
+
+
+def test_plan_carries_the_tourists_left_by_a_split_contract():
+    """The tourist left behind flies first; offers fill the other seats."""
+    names = five()
+    split = contract("five", names, ContractStatus.ACTIVE, delivered=names[:4])
+    contracts = [split, contract("trio", ["E Kerman", "F Kerman", "G Kerman"]),
+                 contract("pair", ["A Kerman", "B Kerman"])]
+    plan = plan_passengers(contracts, seats=4, available=set(names))
+    assert ids(plan.carry) == ["five"]
+    assert [t.kerbal for t in plan.carry[0].tourists] == ["Chutona Kerman"]
+    assert plan.carry[0].completes_contract
+    assert ids(plan.accept) == ["trio"]
+    assert plan.seats_used == 4
+    # A delivered tourist never boards again, even if still at the space center.
+    done = contract("done", ["A Kerman"], ContractStatus.ACTIVE, delivered=["A Kerman"])
+    assert plan_passengers([done], seats=4, available={"A Kerman"}).is_empty
+
+
+def test_plan_finishes_the_smallest_accepted_contracts_first():
+    """Fewer tourists left go first, so contracts are completed sooner."""
+    big = contract("big", five(), ContractStatus.ACTIVE)
+    pair = contract("pair", ["A Kerman", "B Kerman"], ContractStatus.ACTIVE)
+    plan = plan_passengers([big, pair], seats=4, available=set(five()) | {"A Kerman", "B Kerman"})
+    assert ids(plan.carry) == ["pair", "big"]
+    assert [len(b.tourists) for b in plan.carry] == [2, 2]
+    assert plan.carry[1].waiting == 3
 
 
 def test_pilots_take_turns_and_unavailable_ones_are_skipped():
@@ -469,13 +554,14 @@ class FakeGame(TourismGamePort):
 
     def accept_contract(self, contract_id: str) -> None:
         c = self.contracts[contract_id]
-        self.contracts[contract_id] = TourismContract(c.contract_id, c.title, ContractStatus.ACTIVE,
-                                                      c.tourists, c.reward)
+        self.contracts[contract_id] = replace(c, status=ContractStatus.ACTIVE)
 
     def contract_status(self, contract_id: str) -> ContractStatus:
         return self.contracts[contract_id].status
 
     def roster(self) -> list[Kerbal]:
+        # Delivered tourists stay at the space center until their contract
+        # ends: only the itinerary flag tells they already flew.
         tourists = [Kerbal(t.kerbal, "tourist", "Tourist", True)
                     for c in self.contracts.values() if c.status is ContractStatus.ACTIVE
                     for t in c.tourists]
@@ -487,12 +573,26 @@ class FakeGame(TourismGamePort):
         return "Passatgers v1.1"
 
     def finish_flight(self) -> None:
-        """What recovering the tourists does: complete and pay."""
+        """What recovering the tourists does: complete and pay.
+
+        Each tourist on board has their itinerary completed and paid; a
+        contract is completed once all its tourists are.
+        """
+        if not self.complete:
+            return
+        on_board = set(self.launches[-1][1])
         for cid, c in list(self.contracts.items()):
-            if c.status is ContractStatus.ACTIVE and self.complete:
-                self.contracts[cid] = TourismContract(cid, c.title, ContractStatus.COMPLETED,
-                                                      c.tourists, c.reward)
-                self._funds += c.reward
+            if c.status is not ContractStatus.ACTIVE:
+                continue
+            tourists = []
+            for t in c.tourists:
+                if not t.completed and t.kerbal in on_board:
+                    self._funds += t.reward
+                    t = replace(t, completed=True)
+                tourists.append(t)
+            status = (ContractStatus.COMPLETED if all(t.completed for t in tourists)
+                      else ContractStatus.ACTIVE)
+            self.contracts[cid] = replace(c, status=status, tourists=tuple(tourists))
 
     def read_flight(self) -> FlightTelemetry | None:
         return self.flight
@@ -576,6 +676,24 @@ def test_campaign_flies_until_no_contract_is_left():
     assert first.vessel_recovery == 10_000 and first.net == 50_000
     # Only this craft and its debris are recovered, never the rover.
     assert "Rover" not in recovery.recovered
+    assert (first.tourists, first.delivered, first.completed, first.waiting) == (4, 4, 2, 0)
+
+
+def test_campaign_flies_a_contract_bigger_than_the_craft_in_two_flights():
+    """Five tourists, four seats: the fifth flies next, with other tourists."""
+    game = FakeGame([contract("five", five()), contract("trio", ["E Kerman", "F Kerman",
+                                                                "G Kerman"])])
+    result = _campaign(game, target=1_000_000)[0].run()
+    assert result.reason is StopReason.NO_CONTRACTS
+    assert [crew[1:] for _, crew in game.launches] == [
+        five()[:4], ["Chutona Kerman", "E Kerman", "F Kerman", "G Kerman"]]
+    first, second = result.flights
+    # The big contract stays open after the first flight, paying per tourist.
+    assert (first.delivered, first.completed, first.waiting) == (4, 0, 1)
+    assert first.contract_rewards == 4 * 13_000
+    assert (second.delivered, second.completed, second.waiting) == (4, 2, 0)
+    assert second.contract_rewards == 4 * 13_000
+    assert all(c.status is ContractStatus.COMPLETED for c in game.contracts.values())
 
 
 def test_campaign_stops_at_the_target():
@@ -595,7 +713,7 @@ def test_campaign_respects_the_flight_limit():
 def test_campaign_stops_when_contracts_are_not_completed():
     """Something went wrong in the game: do not fly again blindly."""
     game = FakeGame(_offers(), complete=False)
-    with pytest.raises(CampaignError, match="contract"):
+    with pytest.raises(CampaignError, match="itinerary"):
         _campaign(game, target=1_000_000)[0].run()
 
 

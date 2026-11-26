@@ -208,13 +208,23 @@ contract is left:
 
 Each flight:
 
-1. **Chooses the contracts.** Only tourism contracts whose every tourist
-   wants nothing but a suborbital flight of Kerbin. Contracts already
-   accepted board first; the free seats (`--seats`, default 4, pilot not
-   included) are filled with the offers that seat the most tourists and
-   pay the most. Several contracts fly together. If KSP refuses an offer
-   (the Mission Control limit of active contracts), the flight goes with
-   what was accepted.
+1. **Chooses the tourists.** Only tourism contracts whose every tourist
+   wants nothing but a suborbital flight of Kerbin. Tourists of contracts
+   already accepted board first (contracts with fewer tourists left
+   first, so they are completed sooner); the free seats (`--seats`,
+   default 4, pilot not included) are filled with the offers that seat
+   the most tourists and earn the most on this flight. Several contracts
+   fly together. If KSP refuses an offer (the Mission Control limit of
+   active contracts), the flight goes with what was accepted.
+
+   **Contracts bigger than the craft** are accepted too: KSP completes
+   and pays each tourist's itinerary on its own, when that tourist is
+   recovered, so a contract is flown over several flights. The tourists
+   left behind board first on the next flight, and the contract is
+   completed with its last tourist. Splitting an offer is chosen when it
+   fills more seats or pays more per seat (five tourists at 19,500 each
+   beat two pairs at 13,000); between equally paying choices, the one that
+   fits exactly wins. `--dry-run` shows who flies now and how many wait.
 2. **Launches the craft** from the launch pad with a pilot and the
    tourists. Pilots take turns (every hired pilot, or the `--pilot` ones in
    that order). The pilot is boarded first, so they sit in the first seat
@@ -248,12 +258,13 @@ Each flight:
    (`--physics-warp`, `--no-warp`).
 6. **Recovers** the vessel and the pieces of it that landed (same rules as
    `ksp-recover`, but only this craft and its debris; other landed vessels
-   are left alone). Recovering the tourists completes their contracts.
+   are left alone). Recovering the tourists completes their itineraries,
+   and their contracts once no tourist of them is left waiting.
 
 The campaign stops, and asks you to look, when something does not go to
-plan: a contract that is not completed after the recovery, a flight that
-did not reach space, no pilot available, or a vessel lost. Ctrl+C stops it
-at any time; a vessel in flight is then yours.
+plan: a tourist whose itinerary is not completed after the recovery, a
+flight that did not reach space, no pilot available, or a vessel lost.
+Ctrl+C stops it at any time; a vessel in flight is then yours.
 
 You may go on EVA or look at another vessel during a flight: while the
 rocket is not the active vessel the script waits and commands nothing

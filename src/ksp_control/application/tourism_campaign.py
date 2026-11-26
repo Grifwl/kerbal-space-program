@@ -3,12 +3,14 @@
 Each round of the campaign:
 
 1. stops when the funds reach the target;
-2. picks the tourism contracts the next hop can complete (accepted ones
-   first, then offers to fill the seats) and accepts the offers;
+2. picks the tourists of the next hop (tourists of accepted contracts
+   first, then offers to fill the seats) and accepts the offers; a
+   contract with more tourists than seats is split over several flights;
 3. launches the craft with a pilot (taking turns) and the tourists;
 4. flies the hop (``SuborbitalFlightDirector``);
 5. recovers the vessel and whatever pieces of it landed, which brings the
-   tourists home and completes their contracts;
+   tourists home, completes their itineraries and, once a contract has no
+   tourist left waiting, the contract;
 
 and starts again, until the target is reached or no suitable contract is
 left.
@@ -31,7 +33,6 @@ from ksp_control.domain.recovery import RecoveryPolicy
 from ksp_control.domain.tourism import (
     ContractStatus,
     PassengerPlan,
-    TourismContract,
     choose_pilot,
     plan_passengers,
 )
@@ -81,14 +82,18 @@ class FlightSummary:
     Attributes:
         number: Flight number, from 1.
         pilot: Who flew.
-        contracts: Titles of the contracts flown.
+        contracts: The contracts flown, described by their tourists.
         report: How the flight went.
         launch_cost: Funds charged for the vessel at launch.
-        contract_rewards: Rewards of the contracts completed (paid partly
-            during the flight, partly when the tourists are recovered).
+        contract_rewards: Rewards earned by the tourists delivered (their
+            itineraries) and by the contracts this flight completed.
         completed: Contracts completed after the recovery.
         funds_before: Balance just before the launch.
         funds: Balance at the end of the round.
+        tourists: Tourists on board.
+        delivered: Tourists whose itinerary was completed after the
+            recovery.
+        waiting: Tourists of the flown contracts left for later flights.
     """
 
     number: int
@@ -100,6 +105,9 @@ class FlightSummary:
     completed: int
     funds_before: float
     funds: float
+    tourists: int = 0
+    delivered: int = 0
+    waiting: int = 0
 
     @property
     def net(self) -> float:
@@ -148,9 +156,14 @@ class TourismCampaign:
 
     Responsibilities: choose and accept contracts, crew and launch the
     craft, delegate the flight, recover the vessel and its debris, and
-    check that the contracts were completed. Anything unexpected (a
-    contract not completed, a flight that did not reach space) stops the
-    campaign with ``CampaignError`` instead of repeating the mistake.
+    check that every tourist on board had their itinerary completed.
+    Anything unexpected (a tourist not delivered, a flight that did not
+    reach space) stops the campaign with ``CampaignError`` instead of
+    repeating the mistake.
+
+    Contracts with more tourists than seats are accepted and flown over
+    several flights: the tourists left behind board first on the next
+    ones, since they belong to an accepted contract.
 
     Usage notes: the flight is injected as a callable (normally
     ``SuborbitalFlightDirector.fly``) and the recovery as a
@@ -262,16 +275,22 @@ class TourismCampaign:
         """
         if not plan.accept:
             return plan
-        for contract in plan.accept:
-            logger.info("Accepting: %s (%d tourist(s), %.0f funds)",
-                        contract.title, contract.seats, contract.reward)
+        for boarding in plan.accept:
+            contract = boarding.contract
+            logger.info("Accepting: %s (%s; %s funds)", contract.title, contract.describe(),
+                        f"{contract.reward:,.0f}")
+            if boarding.waiting:
+                logger.info("  %d of them fly now, %d on later flight(s)",
+                            len(boarding.tourists), boarding.waiting)
             self._game.accept_contract(contract.contract_id)
         self._sleep(1.0)  # the roster is updated on the next frames
-        for contract in plan.accept:
+        for boarding in plan.accept:
+            contract = boarding.contract
             status = self._game.contract_status(contract.contract_id)
             if status is not ContractStatus.ACTIVE:
-                logger.warning("The game did not accept '%s' (%s); is the active contract "
-                               "limit of Mission Control reached?", contract.title, status.value)
+                logger.warning("The game did not accept '%s' (%s; %s); is the active contract "
+                               "limit of Mission Control reached?", contract.title,
+                               contract.describe(), status.value)
         accepted = self._retry(lambda: self.next_plan(allow_offers=False))
         if accepted.is_empty:
             # Something accepted but nobody can board: flying empty would
@@ -294,14 +313,19 @@ class TourismCampaign:
 
         Raises:
             CampaignError: When no pilot is available, the flight did not
-                reach space or the contracts were not completed.
+                reach space or a tourist's itinerary was not completed.
         """
         options = self._options
         pilot = choose_pilot(self._game.roster(), number - 1, options.pilots)
         if pilot is None:
             raise CampaignError("no pilot is available at the space center")
-        tourists = [t.kerbal for c in plan.contracts for t in c.tourists if t.kerbal]
+        # plan_passengers only boards tourists matched to the roster.
+        tourists = [t.kerbal for t in plan.tourists if t.kerbal]
         logger.info("Flight %d: pilot %s, tourists %s", number, pilot, ", ".join(tourists))
+        for boarding in plan.boardings:
+            if boarding.left_behind:
+                logger.info("  Waiting for a later flight: %s",
+                            ", ".join(t.kerbal or t.itinerary for t in boarding.left_behind))
 
         funds_before = self._retry(self._game.funds)
         vessel = self._game.launch(options.craft, [pilot, *tourists])
@@ -309,27 +333,42 @@ class TourismCampaign:
         report = self._fly()
         self._recover(vessel)
 
-        statuses = self._wait_for_completion(plan.contracts)
-        done = [c for c, s in zip(plan.contracts, statuses) if s is ContractStatus.COMPLETED]
+        statuses, delivered = self._wait_for_delivery(plan)
+        # Rewards paid between the launch and now: the itineraries of the
+        # tourists delivered, and the contract's own completion reward
+        # (``bonus``) when the contract was completed. The advance was paid
+        # on acceptance, before the launch, but KSP tourism contracts have
+        # none, so ``bonus`` is only the completion reward in practice.
+        rewards = 0.0
+        completed = 0
+        for boarding in plan.boardings:
+            contract = boarding.contract
+            rewards += sum(t.reward for t in boarding.tourists
+                           if (contract.contract_id, t.itinerary) in delivered)
+            if statuses[contract.contract_id] is ContractStatus.COMPLETED:
+                rewards += contract.bonus
+                completed += 1
         funds = self._retry(self._game.funds)
         summary = FlightSummary(
-            number, pilot, tuple(c.title for c in plan.contracts), report,
+            number, pilot, tuple(c.describe() for c in plan.contracts), report,
             launch_cost=launch_cost,
-            contract_rewards=sum(c.reward for c in done),
-            completed=len(done),
+            contract_rewards=rewards,
+            completed=completed,
             funds_before=funds_before,
             funds=funds,
+            tourists=plan.seats_used,
+            delivered=len(delivered),
+            waiting=sum(b.waiting for b in plan.boardings),
         )
-        completed = len(done)
         if not report.reached_space:
             raise CampaignError(
                 f"flight {number} only reached {report.max_altitude:,.0f} m: the craft "
                 "cannot get the tourists to space as it is"
             )
-        if completed < len(plan.contracts):
+        if len(delivered) < plan.seats_used:
             raise CampaignError(
-                f"only {completed} of {len(plan.contracts)} contract(s) were completed "
-                f"after flight {number}; check them in Mission Control"
+                f"only {len(delivered)} of {plan.seats_used} tourist(s) completed their "
+                f"itinerary after flight {number}; check the contracts in Mission Control"
             )
         return summary
 
@@ -359,31 +398,54 @@ class TourismCampaign:
             raise CampaignError(f"{vessel} could not be recovered; recover it by hand")
         return sum(o.payout or 0.0 for o in outcomes if o.recovered)
 
-    def _wait_for_completion(
-        self, contracts: tuple[TourismContract, ...], timeout: float = 15.0
-    ) -> list[ContractStatus]:
-        """Wait until the game completes the contracts of the flight.
+    def _wait_for_delivery(
+        self, plan: PassengerPlan, timeout: float = 15.0
+    ) -> tuple[dict[str, ContractStatus], set[tuple[str, str]]]:
+        """Wait until the game completes the itineraries of the flight.
 
-        KSP completes a tourism contract when its tourists are recovered,
-        a moment after the recovery.
+        KSP completes a tourist's itinerary when the tourist is recovered,
+        a moment after the recovery, and the contract once every tourist of
+        it is delivered. A contract split over several flights stays active
+        after this one, so the tourists are checked one by one: a
+        completed contract delivered all of them; for one still active, its
+        itinerary objectives are read again.
 
         Args:
-            contracts: The contracts flown.
+            plan: The flight's tourists.
             timeout: Seconds to wait.
 
         Returns:
-            The status of each contract, in order.
+            The status of each contract flown, by id, and the tourists
+            delivered, as ``(contract id, itinerary title)`` pairs.
         """
-        statuses: list[ContractStatus] = []
+        on_board = {(b.contract.contract_id, t.itinerary) for b in plan.boardings
+                    for t in b.tourists}
+        finishing = [b.contract for b in plan.boardings if b.completes_contract]
+        statuses: dict[str, ContractStatus] = {}
+        delivered: set[tuple[str, str]] = set()
         waited = 0.0
-        while waited <= timeout:
-            statuses = [self._retry(lambda c=c: self._game.contract_status(c.contract_id))
-                        for c in contracts]
-            if all(s is not ContractStatus.ACTIVE for s in statuses):
-                break
+        while True:
+            statuses = {c.contract_id: self._retry(
+                lambda c=c: self._game.contract_status(c.contract_id)) for c in plan.contracts}
+            delivered = {(cid, itinerary) for cid, itinerary in on_board
+                         if statuses[cid] is ContractStatus.COMPLETED}
+            if any(s is ContractStatus.ACTIVE for s in statuses.values()):
+                current = {c.contract_id: c for c in self._retry(self._game.read_tourism_contracts)}
+                for cid, status in statuses.items():
+                    if status is ContractStatus.ACTIVE and cid in current:
+                        done = {t.itinerary for t in current[cid].tourists if t.completed}
+                        delivered |= {(c, i) for c, i in on_board if c == cid and i in done}
+            # Done when everyone is delivered and the contracts this flight
+            # finishes are closed (KSP completes the contract a moment after
+            # the last itinerary), or when nothing can change any more
+            # (every contract completed, failed or cancelled).
+            closing = all(statuses[c.contract_id] is not ContractStatus.ACTIVE
+                          for c in finishing)
+            settled = all(s is not ContractStatus.ACTIVE for s in statuses.values())
+            if (delivered >= on_board and closing) or settled or waited >= timeout:
+                return statuses, delivered
             self._sleep(1.0)
             waited += 1.0
-        return statuses
 
     def _retry(self, read: Callable[[], T], attempts: int = 30) -> T:
         """Run a read that may fail while the game loads a scene.
