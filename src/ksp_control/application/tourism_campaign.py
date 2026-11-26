@@ -37,9 +37,11 @@ from ksp_control.domain.tourism import (
     Boarding,
     ContractStatus,
     Mission,
+    OfferedContract,
     PassengerPlan,
     choose_pilot,
     hop_helps,
+    offers_to_decline,
     orbit_visited,
     plan_passengers,
     tourist_mission,
@@ -85,6 +87,13 @@ class CampaignOptions:
             that want a suborbital flight: a way to check that the craft
             reaches orbit and comes back without risking any contract
             (falling short still completes their suborbital flight).
+        decline_types: Contract types to decline, one at a time, while
+            the next flight would leave seats empty, so that KSP offers
+            new contracts in their place (it costs reputation); empty to
+            never decline.
+        offer_wait: Seconds to wait for a new offer after each decline.
+        max_declines: Most offers declined before one flight, a guard
+            against KSP offering unwanted contracts over and over.
     """
 
     craft: str
@@ -95,6 +104,9 @@ class CampaignOptions:
     body: str = "Kerbin"
     max_mission: Mission = Mission.ORBITAL
     orbit_test: bool = False
+    decline_types: tuple[str, ...] = ()
+    offer_wait: float = 60.0
+    max_declines: int = 10
 
     @property
     def boarding_mission(self) -> Mission:
@@ -290,7 +302,10 @@ class TourismCampaign:
                 return CampaignResult(StopReason.FLIGHT_LIMIT, tuple(flights), start_funds, funds)
 
             self._check_no_vessel_in_flight()
-            plan = self._accept(self._retry(self.next_plan))
+            plan = self._retry(self.next_plan)
+            if plan.seats_used < self._seats and options.decline_types:
+                plan = self._make_room_for_offers(plan)
+            plan = self._accept(plan)
             if plan.is_empty:
                 return CampaignResult(StopReason.NO_CONTRACTS, tuple(flights), start_funds, funds)
 
@@ -314,6 +329,70 @@ class TourismCampaign:
                 f"{flight.vessel} is in flight ({flight.situation}); land and recover it "
                 "first, then run the campaign again"
             )
+
+    def _make_room_for_offers(self, plan: PassengerPlan) -> PassengerPlan:
+        """Decline unwanted offers, one at a time, until tourists fill the seats.
+
+        Only called when the next flight would leave seats empty. KSP keeps
+        a limited number of offers and generates a new one in the place of
+        one declined, which may be a tourism contract. Declining costs
+        reputation, so offers go one at a time and only while seats are
+        empty: decline one, wait for the game to offer something new, plan
+        again. It stops when the seats are full, when nothing unwanted is
+        left to decline (a new unwanted offer counts too), or after
+        ``max_declines``. The flight then goes with whoever there is.
+
+        Args:
+            plan: The plan with seats left empty.
+
+        Returns:
+            The plan after the last decline.
+        """
+        options = self._options
+        before = plan.seats_used
+        declined = 0
+        while plan.seats_used < self._seats:
+            offers = self._retry(self._game.read_offers)
+            unwanted = offers_to_decline(offers, options.decline_types)
+            if not unwanted:
+                break
+            if declined >= options.max_declines:
+                logger.warning("Declined %d offer(s) already: no more before this flight",
+                               declined)
+                break
+            offer = unwanted[0]
+            logger.info("Only %d of %d seat(s) filled: declining '%s' so that a new offer can "
+                        "appear (this costs reputation)", plan.seats_used, self._seats,
+                        offer.title)
+            self._game.decline_contract(offer.contract_id)
+            declined += 1
+            new = self._wait_for_new_offer({o.contract_id for o in offers})
+            if new:
+                logger.info("New offer: %s", "; ".join(o.title for o in new))
+            plan = self._retry(self.next_plan)
+        if declined:
+            logger.info("After declining %d offer(s): %d of %d seat(s) filled (%d before)",
+                        declined, plan.seats_used, self._seats, before)
+        return plan
+
+    def _wait_for_new_offer(self, known: set[str]) -> list[OfferedContract]:
+        """Wait until the game offers a contract that was not there before.
+
+        Args:
+            known: Identifiers of the offers before the decline.
+
+        Returns:
+            The new offers; empty when none came within ``offer_wait``.
+        """
+        waited = 0.0
+        while waited < self._options.offer_wait:
+            self._sleep(5.0)
+            waited += 5.0
+            new = [o for o in self._retry(self._game.read_offers) if o.contract_id not in known]
+            if new:
+                return new
+        logger.info("No new offer after %.0f s", waited)
+        return []
 
     def _accept(self, plan: PassengerPlan) -> PassengerPlan:
         """Accept the offers of a plan and return what can really fly.

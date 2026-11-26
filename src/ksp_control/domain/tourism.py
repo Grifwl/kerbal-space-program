@@ -46,6 +46,9 @@ ORBIT_PREFIX = "orbit"
 # Standard gravity, used by KSP to turn specific impulse into exhaust speed.
 STANDARD_GRAVITY = 9.80665
 
+# KSP contract type of the "test a part" contracts (``Contract.type``).
+PART_TEST_TYPE = "Contracts.Templates.PartTest"
+
 # Crew trait of the kerbals that can fly a crewed command pod.
 PILOT_TRAIT = "Pilot"
 
@@ -184,6 +187,41 @@ class TourismContract:
         """
         names = ", ".join(t.kerbal or t.itinerary for t in self.tourists)
         return f"{len(self.tourists)} tourist(s): {names}"
+
+
+@dataclass(frozen=True)
+class OfferedContract:
+    """Any contract on offer in Mission Control, tourism or not.
+
+    Attributes:
+        contract_id: Identifier valid for the adapter that read it.
+        title: Contract title.
+        kind: KSP contract type, e.g. ``"Contracts.Templates.PartTest"``.
+        can_decline: Whether the game lets it be declined.
+    """
+
+    contract_id: str
+    title: str
+    kind: str
+    can_decline: bool
+
+
+def offers_to_decline(offers: list[OfferedContract], unwanted: tuple[str, ...]) -> list[OfferedContract]:
+    """Pick the offers to decline to make room for new ones.
+
+    KSP keeps a limited number of offers; declining unwanted ones lets it
+    generate others, among which there may be tourism contracts. Declining
+    costs reputation, so only the unwanted types that the game lets go are
+    picked.
+
+    Args:
+        offers: Every contract on offer.
+        unwanted: Contract types not wanted.
+
+    Returns:
+        The offers to decline, in the order given.
+    """
+    return [o for o in offers if o.kind in unwanted and o.can_decline]
 
 
 @dataclass(frozen=True)

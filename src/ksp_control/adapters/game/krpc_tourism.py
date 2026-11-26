@@ -49,6 +49,7 @@ from ksp_control.domain.tourism import (
     EngineState,
     FlightTelemetry,
     Kerbal,
+    OfferedContract,
     Propulsion,
     Tourist,
     TourismContract,
@@ -225,6 +226,36 @@ class KrpcTourismGame(TourismGamePort):
         """
         remote = self._contracts[contract_id]
         self._call(lambda conn: remote.accept())
+
+    def read_offers(self) -> list[OfferedContract]:
+        """Read every contract on offer, of any type.
+
+        Returns:
+            The offers.
+        """
+        def read(conn: Any) -> list[OfferedContract]:
+            result = []
+            for remote in conn.space_center.contract_manager.offered_contracts:
+                contract_id = str(getattr(remote, "_object_id", id(remote)))
+                self._contracts[contract_id] = remote
+                result.append(OfferedContract(
+                    contract_id=contract_id,
+                    title=str(remote.title),
+                    kind=str(remote.type),
+                    can_decline=bool(remote.can_be_declined),
+                ))
+            return result
+
+        return self._call(read)
+
+    def decline_contract(self, contract_id: str) -> None:
+        """Decline an offered contract.
+
+        Args:
+            contract_id: Identifier from ``read_offers``.
+        """
+        remote = self._contracts[contract_id]
+        self._call(lambda conn: remote.decline())
 
     def contract_status(self, contract_id: str) -> ContractStatus:
         """Read the status of a contract seen earlier.

@@ -227,6 +227,16 @@ Each flight:
    beat two pairs at 13,000); between equally paying choices, the one that
    fits exactly wins. `--dry-run` shows who flies now and how many wait.
 
+   **Making room for tourists**: with `--decline-part-tests`, while the
+   next flight would leave seats empty, the "test a part" offers are
+   declined one at a time: after each one the campaign waits up to
+   `--offer-wait` seconds (default 60) for KSP to offer something new and
+   plans again. It stops declining when the seats are full, when no
+   unwanted offer is left (new ones included), or after `--max-declines`
+   (default 10). It then flies if at least one tourist boards, and stops
+   otherwise. Declining costs reputation, which the extra tourists more
+   than pay back; nothing is declined while the seats can be filled.
+
    **Seats**: on the launch pad the campaign reads how many kerbals the
    craft holds and plans the next flights with that number, minus the
    pilot's seat; a bigger craft fills its new cabins from the second

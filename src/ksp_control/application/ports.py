@@ -21,6 +21,7 @@ from ksp_control.domain.tourism import (
     EngineState,
     FlightTelemetry,
     Kerbal,
+    OfferedContract,
     Propulsion,
     TourismContract,
 )
@@ -358,6 +359,28 @@ class TourismGamePort(ABC):
 
         Args:
             contract_id: Identifier from ``read_tourism_contracts``.
+
+        Raises:
+            GameUnavailableError: When the game refuses or cannot be reached.
+        """
+
+    @abstractmethod
+    def read_offers(self) -> list[OfferedContract]:
+        """Read every contract on offer, of any type.
+
+        Returns:
+            The offers.
+
+        Raises:
+            GameUnavailableError: When the game cannot be read.
+        """
+
+    @abstractmethod
+    def decline_contract(self, contract_id: str) -> None:
+        """Decline an offered contract (it costs reputation).
+
+        Args:
+            contract_id: Identifier from ``read_offers``.
 
         Raises:
             GameUnavailableError: When the game refuses or cannot be reached.

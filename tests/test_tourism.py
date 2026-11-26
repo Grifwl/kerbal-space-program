@@ -30,6 +30,7 @@ from ksp_control.domain.tourism import (
     FlightTelemetry,
     Kerbal,
     Mission,
+    OfferedContract,
     Propulsion,
     Tourist,
     TourismContract,
@@ -508,6 +509,8 @@ class SimulatedHop(TourismGamePort):
         return Propulsion(thrust=10.0, isp=300.0, mass=1.0, delta_v=left)
 
     # Unused by a suborbital hop.
+    def read_offers(self): raise NotImplementedError
+    def decline_contract(self, contract_id): raise NotImplementedError
     def read_crew(self): raise NotImplementedError
     def add_node(self, ut, prograde): raise NotImplementedError
     def node_remaining_dv(self): raise NotImplementedError
@@ -679,6 +682,10 @@ class FakeGame(TourismGamePort):
         self.capacity = capacity  # pilot seat included
         self.launches: list[tuple[str, list[str]]] = []
         self.aboard: list[str] = []
+        # Offers that are not tourism, and what KSP offers after a decline.
+        self.other_offers: list[OfferedContract] = []
+        self.replacements: list[TourismContract | OfferedContract] = []
+        self.declined: list[str] = []
         self.pilots = [Kerbal("Jebediah Kerman", "crew", "Pilot", True),
                        Kerbal("Valentina Kerman", "crew", "Pilot", True)]
 
@@ -695,6 +702,21 @@ class FakeGame(TourismGamePort):
 
     def contract_status(self, contract_id: str) -> ContractStatus:
         return self.contracts[contract_id].status
+
+    def read_offers(self) -> list[OfferedContract]:
+        tourism = [OfferedContract(c.contract_id, c.title, "FinePrint.Contracts.TourismContract", True)
+                   for c in self.contracts.values() if c.status is ContractStatus.OFFERED]
+        return self.other_offers + tourism
+
+    def decline_contract(self, contract_id: str) -> None:
+        self.declined.append(contract_id)
+        self.other_offers = [o for o in self.other_offers if o.contract_id != contract_id]
+        if self.replacements:  # KSP fills the free offer slot
+            new = self.replacements.pop(0)
+            if isinstance(new, OfferedContract):
+                self.other_offers.append(new)
+            else:
+                self.contracts[new.contract_id] = new
 
     def roster(self) -> list[Kerbal]:
         # Delivered tourists stay at the space center until their contract
@@ -897,6 +919,73 @@ def test_campaign_reports_the_flight_that_stops_it():
     with pytest.raises(CampaignError):
         _campaign(game, target=1_000_000)[0].run(on_flight=shown.append)
     assert len(shown) == 1 and shown[0].delivered == 0
+
+
+def _part_test(cid: str) -> OfferedContract:
+    """A "test a part" offer."""
+    return OfferedContract(cid, f"Prueba {cid}", "Contracts.Templates.PartTest", True)
+
+
+def test_campaign_declines_part_tests_one_at_a_time_until_the_seats_are_full():
+    """Decline, look again, decline again: KSP may offer another part test."""
+    from ksp_control.domain.tourism import PART_TEST_TYPE
+
+    game = FakeGame([contract("pair", ["A Kerman", "B Kerman"])])
+    game.other_offers = [_part_test("pt1"), _part_test("pt2"), _part_test("pt3"),
+                         OfferedContract("sat", "Satellite", "FinePrint.Contracts.SatelliteContract", True)]
+    game.replacements = [_part_test("pt9"), contract("new", ["C Kerman", "D Kerman"])]
+    _campaign(game, target=1_000_000, max_flights=1, decline_types=(PART_TEST_TYPE,))[0].run()
+    # The first decline brought another part test, the second the tourists:
+    # then the seats were full, so pt3 and pt9 stay, and never the satellite.
+    assert game.declined == ["pt1", "pt2"]
+    assert sorted(game.launches[0][1][1:]) == ["A Kerman", "B Kerman", "C Kerman", "D Kerman"]
+
+
+def test_campaign_stops_declining_after_the_limit():
+    """KSP offering part tests over and over does not drain the reputation."""
+    from ksp_control.domain.tourism import PART_TEST_TYPE
+
+    game = FakeGame([contract("pair", ["A Kerman", "B Kerman"])])
+    game.other_offers = [_part_test("pt0")]
+    game.replacements = [_part_test(f"pt{i}") for i in range(1, 20)]
+    _campaign(game, target=1_000_000, max_flights=1, decline_types=(PART_TEST_TYPE,),
+              max_declines=3)[0].run()
+    assert len(game.declined) == 3 and len(game.launches) == 1
+
+
+def test_campaign_stops_when_declining_brings_nobody():
+    """No tourist at all and nothing left to decline: stop, do not fly empty."""
+    from ksp_control.domain.tourism import PART_TEST_TYPE
+
+    game = FakeGame([])
+    game.other_offers = [_part_test("pt1"), _part_test("pt2")]
+    result = _campaign(game, target=1_000_000, decline_types=(PART_TEST_TYPE,))[0].run()
+    assert result.reason is StopReason.NO_CONTRACTS
+    assert game.declined == ["pt1", "pt2"] and game.launches == []
+
+
+def test_campaign_declines_nothing_when_the_seats_are_full_or_it_is_off():
+    """Declining costs reputation: only when it can fill seats, only if asked."""
+    from ksp_control.domain.tourism import PART_TEST_TYPE
+
+    full = FakeGame([contract("four", ["A Kerman", "B Kerman", "C Kerman", "D Kerman"])])
+    full.other_offers = [_part_test("pt1")]
+    _campaign(full, target=1_000_000, max_flights=1, decline_types=(PART_TEST_TYPE,))[0].run()
+    off = FakeGame([contract("pair", ["A Kerman", "B Kerman"])])
+    off.other_offers = [_part_test("pt1")]
+    _campaign(off, target=1_000_000, max_flights=1)[0].run()
+    assert full.declined == [] and off.declined == []
+
+
+def test_campaign_flies_anyway_when_no_new_tourists_come():
+    """After the wait, the flight goes with the tourists there are."""
+    from ksp_control.domain.tourism import PART_TEST_TYPE
+
+    game = FakeGame([contract("pair", ["A Kerman", "B Kerman"])])
+    game.other_offers = [_part_test("pt1")]
+    _campaign(game, target=1_000_000, max_flights=1, decline_types=(PART_TEST_TYPE,))[0].run()
+    assert game.declined == ["pt1"]
+    assert sorted(game.launches[0][1][1:]) == ["A Kerman", "B Kerman"]
 
 
 def test_campaign_stops_at_the_target():
@@ -1246,6 +1335,8 @@ class SimulatedOrbit(TourismGamePort):
         return 0.0
 
     # Unused by the director.
+    def read_offers(self): raise NotImplementedError
+    def decline_contract(self, contract_id): raise NotImplementedError
     def read_crew(self): raise NotImplementedError
     def funds(self) -> float: raise NotImplementedError
     def read_tourism_contracts(self): raise NotImplementedError

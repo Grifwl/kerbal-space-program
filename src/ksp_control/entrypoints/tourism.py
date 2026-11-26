@@ -40,7 +40,14 @@ from ksp_control.application.tourism_campaign import (
     TourismCampaign,
 )
 from ksp_control.application.vessel_recovery import VesselRecoveryService
-from ksp_control.domain.tourism import FlightProfile, Mission, choose_pilot, contract_mission
+from ksp_control.domain.tourism import (
+    PART_TEST_TYPE,
+    FlightProfile,
+    Mission,
+    choose_pilot,
+    contract_mission,
+    offers_to_decline,
+)
 
 logger = logging.getLogger("ksp_control.tourism")
 
@@ -77,6 +84,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--orbit-test", action="store_true",
                         help="Fly to orbit and back, but board only suborbital tourists: checks "
                              "the craft without risking a contract.")
+    parser.add_argument("--decline-part-tests", action="store_true",
+                        help="While the next flight would leave seats empty, decline offered "
+                             "part test contracts one at a time so that KSP offers others, maybe "
+                             "tourists (costs reputation).")
+    parser.add_argument("--offer-wait", type=float, default=60.0,
+                        help="Seconds to wait for a new offer after each decline (default: 60).")
+    parser.add_argument("--max-declines", type=int, default=10,
+                        help="Most offers declined before one flight (default: 10).")
     parser.add_argument("--apoapsis", type=float, default=75_000.0,
                         help="Target apoapsis of a suborbital hop in metres; must be above "
                              "70,000 (default: 75,000).")
@@ -224,6 +239,9 @@ def main(argv: list[str] | None = None) -> int:
         max_flights=args.max_flights,
         max_mission=Mission.SUBORBITAL if args.suborbital_only else Mission.ORBITAL,
         orbit_test=args.orbit_test,
+        decline_types=(PART_TEST_TYPE,) if args.decline_part_tests else (),
+        offer_wait=args.offer_wait,
+        max_declines=args.max_declines,
     )
     campaign = TourismCampaign(game, director.fly, recovery, options)
     try:
@@ -302,6 +320,11 @@ def _dry_run(game: KrpcTourismGame, campaign: TourismCampaign, options: Campaign
     print(f"Next flight ({mission.label}{', orbit test' if options.orbit_test else ''}): "
           f"pilot {pilot or '(none available!)'}, "
           f"{plan.seats_used}/{campaign.seats} seat(s){seats_note}, {plan.reward:,.0f} funds")
+    if plan.seats_used < campaign.seats and options.decline_types:
+        unwanted = offers_to_decline(game.read_offers(), options.decline_types)
+        if unwanted:
+            print(f"  seats left empty: up to {len(unwanted)} unwanted offer(s) would be "
+                  "declined, one at a time, to make room for tourists")
     for label, boardings in (("already accepted", plan.carry), ("to accept", plan.accept)):
         for boarding in boardings:
             names = ", ".join(t.kerbal or t.itinerary for t in boarding.tourists)
