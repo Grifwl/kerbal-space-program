@@ -360,7 +360,12 @@ The campaign stops, and asks you to look, when something does not go to
 plan: a tourist whose itinerary is not completed after the recovery, a
 flight that did not reach space (or orbit, when it had to), no pilot
 available, or a vessel lost.
-Ctrl+C stops it at any time; a vessel in flight is then yours.
+Ctrl+C stops it at any time; a vessel in flight is then yours. It never
+launches while the active vessel is flying. A vessel waiting on the launch
+pad with its crew (a flight reverted to launch) is recovered before the
+next launch, which refunds it and brings the crew back: launching on top
+of it lets KSP recover the crew only half way (it cannot remove the active
+vessel), and a pilot ended up missing that way.
 
 You may go on EVA or look at another vessel during a flight: while the
 rocket is not the active vessel the script waits and commands nothing

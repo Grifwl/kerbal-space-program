@@ -302,6 +302,9 @@ class TourismCampaign:
                 return CampaignResult(StopReason.FLIGHT_LIMIT, tuple(flights), start_funds, funds)
 
             self._check_no_vessel_in_flight()
+            # Before planning: the crew of a vessel on the pad is not
+            # available until it is recovered.
+            self._clear_launch_pad()
             plan = self._retry(self.next_plan)
             if plan.seats_used < self._seats and options.decline_types:
                 plan = self._make_room_for_offers(plan)
@@ -317,8 +320,9 @@ class TourismCampaign:
         """Refuse to go on while a vessel is flying.
 
         Launching switches to a new vessel, and KSP deletes a vessel left
-        behind in the atmosphere, with whoever is on board. A vessel on
-        the launch pad is fine: the launch recovers it first.
+        behind in the atmosphere, with whoever is on board. A vessel
+        waiting on the launch pad is recovered first (see
+        ``_clear_launch_pad``).
 
         Raises:
             CampaignError: When the active vessel is in the air or in space.
@@ -329,6 +333,28 @@ class TourismCampaign:
                 f"{flight.vessel} is in flight ({flight.situation}); land and recover it "
                 "first, then run the campaign again"
             )
+
+    def _clear_launch_pad(self) -> None:
+        """Recover the active vessel when it is still waiting on the pad.
+
+        That is where a flight reverted to launch leaves it, crew on board.
+        Launching on top of it is not safe: the launch asks KSP to recover
+        whatever stands on the pad, but KSP refuses to remove the *active*
+        vessel ("is the active vessel. Cannot remove."). Its crew is then
+        recovered only half way, and seen in game: the pilot ended up
+        missing. Recovered here, the way a landed vessel is, the launch is
+        refunded and the crew is back at the space center, the tourists
+        with their contracts still open; they board again on this flight.
+
+        Raises:
+            CampaignError: When the vessel could not be recovered.
+        """
+        flight = self._retry(self._game.read_flight)
+        if flight is None or flight.situation != "pre_launch":
+            return
+        logger.warning("%s is waiting on the launch pad with its crew (a reverted flight?): "
+                       "recovering it before launching", flight.vessel)
+        self._recover(flight.vessel)
 
     def _make_room_for_offers(self, plan: PassengerPlan) -> PassengerPlan:
         """Decline unwanted offers, one at a time, until tourists fill the seats.

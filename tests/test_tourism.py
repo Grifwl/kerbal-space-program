@@ -805,6 +805,7 @@ class FakeRecovery:
                 if d.vessel.is_active:
                     self.game._funds += 10_000  # the vessel's value
                     self.game.finish_flight()
+                    self.game.flight = None  # back to the space center
                 outcomes.append(RecoveryOutcome(d, True, 1_000.0, "recovered"))
         return outcomes
 
@@ -1024,6 +1025,23 @@ def test_campaign_never_launches_while_a_vessel_is_flying():
         _campaign(game, target=1_000_000)[0].run()
     assert not game.launches
     assert all(c.status is ContractStatus.OFFERED for c in game.contracts.values())
+
+
+def test_campaign_recovers_a_vessel_left_on_the_pad_before_launching():
+    """A flight reverted to launch leaves the vessel, crew aboard, on the pad.
+
+    Launching on top of it left the pilot missing in game: it is recovered
+    first, and only once.
+    """
+    game = FakeGame(_offers())
+    game.flight = FlightTelemetry("Passatgers v1.1", "pre_launch", 70, 0, 0, 0, 0,
+                                  0.0, 4, 0, 70_000)
+    campaign, recovery = _campaign(game, target=1_000_000, max_flights=1)
+    campaign.run()
+    # Recovered before the launch (the flight's own recovery comes after).
+    assert recovery.recovered.count("Passatgers v1.1") == 2
+    assert "Rover" not in recovery.recovered
+    assert len(game.launches) == 1
 
 
 def _orbital_offers() -> list[TourismContract]:
