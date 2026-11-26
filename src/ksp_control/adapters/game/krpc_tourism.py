@@ -513,6 +513,17 @@ class KrpcTourismGame(TourismGamePort):
 
         self._call(write)
 
+    def set_rcs(self, on: bool) -> None:
+        """Switch the RCS on or off (the R key).
+
+        Args:
+            on: True to let the autopilot use the RCS thrusters.
+        """
+        def write(conn: Any) -> None:
+            conn.space_center.active_vessel.control.rcs = bool(on)
+
+        self._call(write)
+
     def release_controls(self) -> None:
         """Disengage the autopilot and leave the throttle at zero."""
         def write(conn: Any) -> None:

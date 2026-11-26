@@ -489,6 +489,14 @@ class TourismGamePort(ABC):
         """Point the nose against the surface velocity (heat shield first)."""
 
     @abstractmethod
+    def set_rcs(self, on: bool) -> None:
+        """Switch the reaction control system (RCS) on or off.
+
+        Args:
+            on: True to let the autopilot use the RCS thrusters.
+        """
+
+    @abstractmethod
     def release_controls(self) -> None:
         """Disengage the autopilot and leave the throttle at zero."""
 

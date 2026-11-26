@@ -89,6 +89,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "proportion to the apoapsis rise, lower = tilt sooner (cheaper "
                              "circularization, but more time fast in thick, hot air) "
                              "(default: 1).")
+    parser.add_argument("--turn-after-first-stage", action="store_true",
+                        help="Start the orbital gravity turn only once the first stage (the "
+                             "boosters) has been dropped, for a rocket that loses control when "
+                             "they separate while it is tilted; costs some delta-v.")
     parser.add_argument("--orbit-delta-v", type=float, default=3_600.0,
                         help="Vacuum delta-v the craft needs on the pad to try an orbit, in m/s; "
                              "with less it flies a suborbital hop (default: 3,600).")
@@ -110,6 +114,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "the temperature it withstands; 0 = never (default: 80).")
     parser.add_argument("--min-throttle", type=float, default=0.1,
                         help="Lowest throttle the air limits may set (default: 0.1).")
+    parser.add_argument("--no-rcs", action="store_true",
+                        help="Leave the RCS off (by default it is switched on from the launch "
+                             "until the parachutes open, so the autopilot can use it).")
     parser.add_argument("--no-warp", action="store_true",
                         help="Never use time warp.")
     parser.add_argument("--physics-warp", type=int, default=2, choices=range(0, 4),
@@ -151,12 +158,14 @@ def format_summary(summary: FlightSummary) -> str:
     waiting = f", {summary.waiting} waiting for a later flight" if summary.waiting else ""
     orbit = ""
     if summary.mission is Mission.ORBITAL:
+        where = "in orbit" if report.reached_orbit else "above the atmosphere"
         left = ("" if report.delta_v_orbit is None
-                else f", {report.delta_v_orbit:,.0f} m/s left in orbit")
+                else f", {report.delta_v_orbit:,.0f} m/s left {where}")
         orbit = f" (orbit {'reached' if report.reached_orbit else 'NOT reached'}{left})"
     return (
         f"Flight {summary.number} ({summary.pilot}, {summary.mission.label}): "
-        f"{report.situation} after {report.max_altitude:,.0f} m{orbit}; "
+        f"{report.situation} after {report.max_altitude:,.0f} m{orbit}; hottest part "
+        f"{report.ascent_heat:.0%} climbing, {report.reentry_heat:.0%} coming down; "
         f"{summary.delivered}/{summary.tourists} tourist(s) "
         f"delivered, {summary.completed}/{len(summary.contracts)} contract(s) completed"
         f"{waiting}. Launch -{summary.launch_cost:,.0f}, contracts "
@@ -198,10 +207,12 @@ def main(argv: list[str] | None = None) -> int:
         max_dynamic_pressure=args.max_q * 1000.0,
         max_drag_ratio=args.max_drag,
         min_throttle=args.min_throttle,
+        use_rcs=not args.no_rcs,
         max_heat_ratio=args.max_heat / 100.0,
         orbit_delta_v=args.orbit_delta_v,
         orbit_apoapsis=args.orbit,
         orbit_turn_shape=args.turn_shape,
+        turn_after_first_stage=args.turn_after_first_stage,
         deorbit_periapsis=args.deorbit_periapsis,
     )
     director = TourismFlightDirector(game, profile)

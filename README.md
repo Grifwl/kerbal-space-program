@@ -287,7 +287,11 @@ Each flight:
      apoapsis reaches `--orbit` (default 80 km), so the turn adapts to the
      rocket's thrust. `--turn-shape` below 1 (the default) tilts sooner:
      circularizing then costs less, but the rocket spends longer flying
-     fast in thick, hot air. Same air and heat limits and staging as the
+     fast in thick, hot air. `--turn-after-first-stage` keeps the rocket
+     vertical until the first stage (the boosters) has been dropped, for a
+     long rocket that loses control when they separate while it is
+     tilted; climbing straight up for longer costs some delta-v. Same air
+     and heat limits and staging as the
      hop. The engines are cut at the target apoapsis and relit if the air
      pulls it more than 500 m below before leaving the atmosphere.
    - *Circularization*: a maneuver node at the apoapsis raises the
@@ -296,6 +300,12 @@ Each flight:
      the circularization, the deorbit burn and 100 m/s of reserve:
      otherwise the vessel is not put into orbit (it could be stranded
      there), comes down as a suborbital flight and the campaign stops.
+     If the periapsis is still in the atmosphere after the burn (a long
+     burn loses some push past the apoapsis), a prograde top-up with the
+     delta-v beyond the deorbit burn and the reserve lifts it out. If no
+     orbit is reached and the periapsis only grazes the atmosphere, it is
+     lowered to the deorbit periapsis before the engines are jettisoned,
+     so the capsule does not skim the atmosphere for orbits on end.
    - *Orbit*: the vessel stays in orbit until the game marks the tourists'
      orbit destinations as reached (after 2 minutes without it, the
      campaign stops and leaves the vessel in orbit for you).
@@ -313,6 +323,16 @@ Each flight:
    orbit, but only suborbital tourists board. Tourists recovered without
    reaching their destination do not fail their contract (seen in game):
    they stay at the space center for another flight.
+   **RCS**: the RCS is switched on from the launch until the parachutes
+   open, so the autopilot can also steer with RCS thrusters (a vessel
+   launched by kRPC starts with it off); `--no-rcs` leaves it off. Keep
+   an eye on the monopropellant: the autopilot fires the thrusters on
+   every correction.
+
+   The flight summary shows how hot the hottest part got while climbing
+   and while coming down, as a percentage of the temperature it
+   withstands: the margin left before `--max-heat` acts (on the way up)
+   or before a part could burn up (on the way down).
 5. **Lands**: the parachute stage is activated when KSP rates a parachute
    safe to open (or below 2 km anyway); the game then opens them when it
    is safe. The autopilot keeps the heat shield forward until a canopy

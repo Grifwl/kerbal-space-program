@@ -36,7 +36,12 @@ three steps between the ascent and the space phase:
   periapsis to the same altitude. Before it, KSP's own delta-v figure must
   cover the circularization, the deorbit burn and a reserve; otherwise the
   vessel is not put into orbit at all (it could be stranded there) and the
-  flight goes on as a suborbital one.
+  flight goes on as a suborbital one. A long burn loses some of its push
+  past the apoapsis; if the periapsis is still in the atmosphere after it,
+  a prograde top-up with the delta-v beyond the deorbit burn and the
+  reserve lifts it out. When no orbit is reached and the periapsis only
+  grazes the atmosphere, it is lowered to the deorbit periapsis before the
+  engines are jettisoned, so the capsule does come down.
 * **Orbit**: the director waits until the game marks the tourists' orbit
   destinations as reached.
 * **Deorbit**: a retrograde node at the apoapsis lowers the periapsis
@@ -89,6 +94,11 @@ ALIGNED_DEGREES = 5.0
 NODE_TOLERANCE = 0.5
 # How long to wait in orbit for the game to count the tourists' orbit.
 ORBIT_OBJECTIVES_TIMEOUT = 120.0
+# A periapsis top-up stops this far above the atmosphere, in metres.
+PERIAPSIS_MARGIN = 1_000.0
+# Without an orbit, a periapsis this far above the deorbit periapsis only
+# grazes the atmosphere: the capsule could skim it for many orbits.
+GRAZING_MARGIN = 10_000.0
 
 
 class FlightError(RuntimeError):
@@ -127,6 +137,9 @@ class FlightReport:
         orbit_delta_v_needed: Set when an orbital flight was flown as a
             suborbital hop because the vessel had less delta-v on the pad
             than this, in m/s.
+        ascent_heat: Highest temperature of any part during the ascent, as
+            a fraction of what it withstands.
+        reentry_heat: The same during the reentry and the descent.
     """
 
     vessel: str
@@ -137,6 +150,8 @@ class FlightReport:
     delta_v_launch: float | None = None
     delta_v_orbit: float | None = None
     orbit_delta_v_needed: float | None = None
+    ascent_heat: float = 0.0
+    reentry_heat: float = 0.0
 
 
 class TourismFlightDirector:
@@ -243,6 +258,10 @@ class TourismFlightDirector:
                     target_apoapsis, delta_v_launch)
         self._game.set_throttle(1.0)
         self._game.point(90.0, profile.heading)
+        if profile.use_rcs:
+            # The autopilot only fires RCS thrusters while the RCS is on,
+            # and a vessel launched by kRPC starts with it off.
+            self._game.set_rcs(True)
         self._do_stage()
 
         phase = Phase.ASCENT
@@ -261,11 +280,21 @@ class TourismFlightDirector:
         # they drive the orbital gravity turn.
         turn_start_apoapsis: float | None = None
         peak_apoapsis = 0.0
+        # Stages dropped during the ascent (the launch itself not counted).
+        ascent_stagings = 0
+        ascent_heat = 0.0
+        reentry_heat = 0.0
 
         while phase is not Phase.LANDED:
             self._sleep(self._interval)
             t = self._read_own()
             dt, last_ut = t.ut - last_ut, t.ut
+            # Peak heat of the two hot moments: climbing fast through the
+            # air, and coming back down into it.
+            if phase is Phase.ASCENT:
+                ascent_heat = max(ascent_heat, t.heat_ratio)
+            elif phase in (Phase.REENTRY, Phase.DESCENT):
+                reentry_heat = max(reentry_heat, t.heat_ratio)
 
             if phase is Phase.ASCENT:
                 if t.altitude >= t.atmosphere_depth and not reached_space:
@@ -296,7 +325,8 @@ class TourismFlightDirector:
                 if not orbital:
                     wanted_pitch = ascent_pitch(t.altitude, profile.turn_altitude,
                                                 profile.turn_end_altitude, final_pitch)
-                elif t.altitude <= profile.turn_altitude:
+                elif t.altitude <= profile.turn_altitude or (
+                        profile.turn_after_first_stage and ascent_stagings == 0):
                     wanted_pitch = 90.0
                 else:
                     if turn_start_apoapsis is None:
@@ -338,6 +368,7 @@ class TourismFlightDirector:
                 ):
                     logger.info("Staging: activating stage %d", t.current_stage - 1)
                     self._do_stage()
+                    ascent_stagings += 1
 
             elif phase is Phase.SPACE:
                 if self._jettison(t):
@@ -376,6 +407,8 @@ class TourismFlightDirector:
                     # with the autopilot would only spin the vessel.
                     logger.info("Parachutes open at %.0f m, %.0f m/s", t.altitude, t.surface_speed)
                     self._game.release_controls()
+                    if profile.use_rcs:
+                        self._game.set_rcs(False)
                     released = True
                     if profile.warp and profile.physics_warp > 0 and not t.on_ground:
                         self._game.set_physics_warp(profile.physics_warp)
@@ -389,7 +422,8 @@ class TourismFlightDirector:
         final = self._read()
         return FlightReport(final.vessel, reached_space, self._max_altitude, final.situation,
                             reached_orbit=reached_orbit, delta_v_launch=delta_v_launch,
-                            delta_v_orbit=delta_v_orbit, orbit_delta_v_needed=orbit_delta_v_needed)
+                            delta_v_orbit=delta_v_orbit, orbit_delta_v_needed=orbit_delta_v_needed,
+                            ascent_heat=ascent_heat, reentry_heat=reentry_heat)
 
     # ---------------------------------------------------------------- orbit
 
@@ -440,8 +474,21 @@ class TourismFlightDirector:
         self._burn("Circularization", t.ut + t.time_to_apoapsis, circularize, propulsion)
         t = self._read_own()
         if not t.in_orbit:
-            logger.warning("Circularization fell short (periapsis %.0f m): flying suborbital",
+            # A long burn centred on the apoapsis loses some of its push
+            # past it. Top it up with what is left beyond the deorbit burn
+            # and the reserve, stopping as soon as the periapsis is out.
+            left = self._game.read_propulsion()
+            budget = left.delta_v - deorbit - profile.delta_v_reserve
+            if budget > 0:
+                logger.info("Periapsis still at %.0f m: burning prograde to lift it above the "
+                            "atmosphere (up to %.0f m/s)", t.periapsis, budget)
+                self._burn("Periapsis top-up", t.ut + TURN_MARGIN, budget, left,
+                           stop=lambda r: r.periapsis > r.atmosphere_depth + PERIAPSIS_MARGIN)
+                t = self._read_own()
+        if not t.in_orbit:
+            logger.warning("Circularization fell short (periapsis %.0f m): no orbit",
                            t.periapsis)
+            self._lower_grazing_periapsis(t)
             return False, self._game.read_propulsion().delta_v
         left = self._game.read_propulsion()
         logger.info("In orbit: periapsis %.0f m, apoapsis %.0f m; %.0f m/s left",
@@ -468,7 +515,45 @@ class TourismFlightDirector:
         logger.info("Deorbited: periapsis %.0f m", t.periapsis)
         return True, left.delta_v
 
-    def _burn(self, label: str, ut: float, delta_v: float, propulsion: Propulsion) -> None:
+    def _lower_grazing_periapsis(self, t: FlightTelemetry) -> None:
+        """Bring a periapsis that only grazes the atmosphere down to deorbit.
+
+        Without an orbit the stages above the parachutes are jettisoned
+        next. With a periapsis just under the top of the atmosphere the
+        capsule would skim it and climb out again, orbit after orbit,
+        without an engine. While the engines are still there, a retrograde
+        burn lowers the periapsis to the deorbit periapsis.
+
+        Args:
+            t: Telemetry after the failed circularization.
+        """
+        profile = self._profile
+        if t.periapsis <= profile.deorbit_periapsis + GRAZING_MARGIN:
+            return
+        if not any(e.has_fuel for e in self._game.read_engines()):
+            logger.warning("Periapsis at %.0f m only grazes the atmosphere and no engine has "
+                           "fuel left: the capsule may take several passes to come down",
+                           t.periapsis)
+            return
+        logger.warning("Periapsis at %.0f m only grazes the atmosphere: lowering it to %.0f m "
+                       "before jettisoning the engines", t.periapsis, profile.deorbit_periapsis)
+        # At the apoapsis when it comes soon, the cheapest point; otherwise
+        # now. The burn stops on the periapsis anyway, so the delta-v given
+        # to the node is only an upper bound.
+        if 2 * TURN_MARGIN < t.time_to_apoapsis < 600.0:
+            burn_at = t.ut + t.time_to_apoapsis
+        else:
+            burn_at = t.ut + TURN_MARGIN
+        radius = t.body_radius + t.apoapsis
+        estimate = apsis_burn_dv(t.mu, radius, t.semi_major_axis,
+                                 t.body_radius + profile.deorbit_periapsis)
+        propulsion = self._game.read_propulsion()
+        delta_v = -min(propulsion.delta_v, max(2 * abs(estimate), 50.0))
+        self._burn("Deorbit", burn_at, delta_v, propulsion,
+                   stop=lambda r: r.periapsis <= profile.deorbit_periapsis)
+
+    def _burn(self, label: str, ut: float, delta_v: float, propulsion: Propulsion,
+              stop: Callable[[FlightTelemetry], bool] | None = None) -> None:
         """Execute a maneuver node: aim, wait (warping), burn, clean up.
 
         The burn is centred on the node, so it starts half its duration
@@ -483,6 +568,8 @@ class TourismFlightDirector:
             delta_v: Prograde delta-v of the node, in m/s (negative:
                 retrograde).
             propulsion: Engines at hand, to estimate the duration.
+            stop: Ends the burn early when it returns True for the latest
+                telemetry (the node's delta-v is then only an upper bound).
         """
         duration = burn_time(delta_v, propulsion.thrust, propulsion.isp, propulsion.mass)
         if not math.isfinite(duration):
@@ -510,6 +597,8 @@ class TourismFlightDirector:
         best = math.inf
         while True:
             t = self._read_own()
+            if stop is not None and stop(t):
+                break
             remaining = self._game.node_remaining_dv()
             if remaining is None or remaining < NODE_TOLERANCE or remaining > best + 1.0:
                 break

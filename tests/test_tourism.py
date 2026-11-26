@@ -394,6 +394,7 @@ class SimulatedHop(TourismGamePort):
     ])
     control: bool = True
     throttles: list[float] = field(default_factory=list)
+    rcs: list[bool] = field(default_factory=list)
     # (altitude, dynamic pressure in Pa) while climbing under power.
     climb_q: list[tuple[float, float]] = field(default_factory=list)
 
@@ -434,6 +435,12 @@ class SimulatedHop(TourismGamePort):
 
     # Port ------------------------------------------------------------------
     def read_flight(self) -> FlightTelemetry:
+        reading = self._reading()
+        # Heat grows with speed in the air: a rough stand-in for the game.
+        return replace(reading, heat_ratio=min(1.0, self._q() / 100_000.0))
+
+    def _reading(self) -> FlightTelemetry:
+        """Telemetry without the heat."""
         apo = self.altitude + (self.vs ** 2 / 19.6 if self.vs > 0 else 0.0)
         on_ground = self.altitude == 0.0 and self.t > 5
         return FlightTelemetry(
@@ -481,6 +488,9 @@ class SimulatedHop(TourismGamePort):
 
     def hold_retrograde(self) -> None:
         pass
+
+    def set_rcs(self, on: bool) -> None:
+        self.rcs.append(on)
 
     def release_controls(self) -> None:
         self.throttle = 0.0
@@ -540,6 +550,10 @@ def test_hop_reaches_space_jettisons_and_lands():
     assert altitude[2] <= altitude[1] and altitude[1] >= 70_000
     assert altitude[0] < 20_000
     assert sim.warped and sim.physics_warp == 0
+    # RCS on for the flight, off once the parachutes hold the capsule.
+    assert sim.rcs == [True, False]
+    # Heat peaks are reported for the climb and for the way down.
+    assert 0 < report.ascent_heat <= 1 and 0 < report.reentry_heat <= 1
 
 
 def _peak_q(sim: SimulatedHop) -> float:
@@ -742,6 +756,7 @@ class FakeGame(TourismGamePort):
     def aim_at_node(self): raise NotImplementedError
     def remove_nodes(self): raise NotImplementedError
     def pointing_error(self): raise NotImplementedError
+    def set_rcs(self, on): raise NotImplementedError
     def close(self) -> None: pass
 
 
@@ -1002,6 +1017,7 @@ class SimulatedOrbit(TourismGamePort):
     burns: list[float] = field(default_factory=list)  # prograde delta-v of each node
     staged_at: list[tuple[int, float]] = field(default_factory=list)
     max_periapsis: float = -KERBIN_RADIUS
+    pitches: list[tuple[int, float]] = field(default_factory=list)  # (stage, pitch)
     engines: list[_Engine] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -1163,9 +1179,13 @@ class SimulatedOrbit(TourismGamePort):
 
     def point(self, pitch: float, heading: float) -> None:
         self.mode, self.pitch = "pitch", pitch
+        self.pitches.append((self.current_stage, pitch))
 
     def hold_retrograde(self) -> None:
         self.mode = "retro"
+
+    def set_rcs(self, on: bool) -> None:
+        pass
 
     def release_controls(self) -> None:
         self.throttle = 0.0
@@ -1244,6 +1264,54 @@ def test_orbital_flight_without_enough_delta_v_stays_suborbital():
     assert report.reached_space and not report.reached_orbit
     assert report.situation == "splashed"
     assert sim.burns == [] and sim.max_periapsis < 70_000
+
+
+def test_turn_after_first_stage_and_periapsis_top_up():
+    """Vertical until the boosters drop; the short circularization is topped up.
+
+    Climbing straight up for longer leaves the rocket on a steeper path:
+    in this simulation the circularization burn, centred on the apoapsis,
+    leaves the periapsis just inside the atmosphere, and the top-up burn
+    lifts it out.
+    """
+    sim = SimulatedOrbit()
+    report = _director(sim, turn_after_first_stage=True).fly(Mission.ORBITAL, lambda: True)
+    assert report.reached_orbit and report.situation == "splashed"
+    # Straight up while the boosters (stage 4) are on.
+    assert all(pitch == 90.0 for stage, pitch in sim.pitches if stage >= 4)
+    assert any(pitch < 90.0 for stage, pitch in sim.pitches if stage < 4)
+    # Circularization, top-up, deorbit.
+    assert len(sim.burns) == 3 and sim.burns[1] > 0 > sim.burns[2]
+
+
+@dataclass
+class _NoTopUpOrbit(SimulatedOrbit):
+    """After the first burn, KSP's delta-v figure leaves nothing for a top-up."""
+
+    nodes_done: int = 0
+
+    def remove_nodes(self) -> None:
+        self.nodes_done += 1
+        super().remove_nodes()
+
+    def read_propulsion(self) -> Propulsion:
+        reading = super().read_propulsion()
+        return replace(reading, delta_v=100.0) if self.nodes_done else reading
+
+
+def test_grazing_periapsis_is_lowered_before_jettisoning():
+    """No orbit and a periapsis just under 70 km: deorbit, then jettison.
+
+    The circularization comes out short (see the test above) and nothing
+    is left for a top-up: the vessel would otherwise skim the atmosphere.
+    """
+    sim = _NoTopUpOrbit()
+    report = _director(sim, turn_after_first_stage=True).fly(Mission.ORBITAL, lambda: True)
+    assert report.reached_space and not report.reached_orbit
+    assert report.situation == "splashed"
+    assert len(sim.burns) == 2 and sim.burns[1] < 0
+    # The engines were only jettisoned after the deorbit burn lowered the periapsis.
+    assert dict(sim.staged_at)[1] > 70_000
 
 
 def test_orbital_flight_stays_in_orbit_when_the_game_does_not_count_it():

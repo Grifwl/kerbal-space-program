@@ -1067,6 +1067,9 @@ class FlightProfile:
         max_drag_ratio: Throttle down while the drag exceeds this multiple
             of the weight (1.0 = climb at terminal velocity); 0 disables.
         min_throttle: Lowest throttle the air limits may set.
+        use_rcs: Switch the RCS on from the launch until the parachutes
+            open, so the autopilot can steer with the RCS thrusters too
+            (a vessel launched by kRPC starts with the RCS off).
         max_heat_ratio: Throttle down while the hottest part is above this
             fraction of the temperature it withstands; 0 disables.
         orbit_apoapsis: Apoapsis of the orbital ascent, which then becomes
@@ -1075,6 +1078,11 @@ class FlightProfile:
             at ``turn_altitude`` and is horizontal once the apoapsis
             reaches ``orbit_apoapsis`` (see ``apoapsis_pitch``); lower
             tilts sooner.
+        turn_after_first_stage: Start the orbital gravity turn only once
+            the first stage has been dropped (and above
+            ``turn_altitude``): a long rocket may lose control if its
+            boosters separate while it is tilted. Climbing straight up for
+            longer costs delta-v.
         deorbit_periapsis: Periapsis the deorbit burn aims for, in metres:
             deep enough in the atmosphere to come down in one pass.
         delta_v_reserve: Delta-v that must be left after circularizing
@@ -1097,9 +1105,11 @@ class FlightProfile:
     max_dynamic_pressure: float = 20_000.0
     max_drag_ratio: float = 1.0
     min_throttle: float = 0.1
+    use_rcs: bool = True
     max_heat_ratio: float = 0.8
     orbit_apoapsis: float = 80_000.0
     orbit_turn_shape: float = 1.0
+    turn_after_first_stage: bool = False
     deorbit_periapsis: float = 35_000.0
     delta_v_reserve: float = 100.0
     orbit_delta_v: float = 3_600.0
