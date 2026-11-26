@@ -400,6 +400,20 @@ def contract_mission(contract: TourismContract, body: str = "Kerbin") -> Mission
     return max(m for m in missions if m is not None)
 
 
+def hop_helps(tourist: Tourist, body: str = "Kerbin") -> bool:
+    """Tell whether a suborbital hop would reach a destination of a tourist.
+
+    Args:
+        tourist: The tourist, as read before the flight.
+        body: Body launched from.
+
+    Returns:
+        True when the tourist has a suborbital destination not yet reached.
+    """
+    return any(destination_mission(d, body) is Mission.SUBORBITAL and d not in tourist.visited
+               for d in tourist.destinations)
+
+
 def orbit_visited(tourist: Tourist, body: str = "Kerbin") -> bool:
     """Tell whether the game marked a tourist's orbit destinations reached.
 

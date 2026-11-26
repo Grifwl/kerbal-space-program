@@ -278,8 +278,11 @@ Each flight:
      delta-v reaches `--orbit-delta-v` (default 3,600 m/s: about 3,400 to
      reach a low orbit, plus the deorbit and a reserve). With less, an
      orbital ascent would spend its fuel sideways and might not even reach
-     space; the vessel flies a suborbital hop instead, so the tourists
-     reach space, and the campaign stops.
+     space. If a tourist on board still has a suborbital destination to
+     reach, the vessel flies a suborbital hop instead; otherwise (all of
+     them already went suborbital and only miss the orbit) it does not
+     take off: it is recovered from the pad, which refunds the launch. In
+     both cases the campaign stops.
    - *Ascent*: vertical for the first kilometre, then a gravity turn to
      the east driven by the apoapsis: the pitch drops from 90 degrees in
      proportion to how far the apoapsis has risen, from where it was at

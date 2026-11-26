@@ -29,7 +29,7 @@ from enum import Enum
 from typing import TypeVar
 
 from ksp_control.application.ports import GameUnavailableError, TourismGamePort
-from ksp_control.application.tourism_flight import FlightReport
+from ksp_control.application.tourism_flight import FlightReport, NotEnoughDeltaVError
 from ksp_control.application.vessel_recovery import VesselRecoveryService
 from ksp_control.domain.ledger import owner_vessel
 from ksp_control.domain.recovery import RecoveryPolicy
@@ -39,6 +39,7 @@ from ksp_control.domain.tourism import (
     Mission,
     PassengerPlan,
     choose_pilot,
+    hop_helps,
     orbit_visited,
     plan_passengers,
     tourist_mission,
@@ -211,7 +212,7 @@ class TourismCampaign:
     def __init__(
         self,
         game: TourismGamePort,
-        fly: Callable[[Mission, Callable[[], bool] | None], FlightReport],
+        fly: Callable[[Mission, Callable[[], bool] | None, bool], FlightReport],
         recovery: VesselRecoveryService,
         options: CampaignOptions,
         sleep: Callable[[float], None] = time.sleep,
@@ -222,7 +223,9 @@ class TourismCampaign:
             game: Port to the game.
             fly: Flies the launched vessel on a mission and back to the
                 ground; the second argument tells whether the game counts
-                the orbit for every tourist on board.
+                the orbit for every tourist on board, the third whether a
+                suborbital hop would still help someone on board (it may
+                raise ``NotEnoughDeltaVError`` on the launch pad).
             recovery: Recovers the vessel and its debris.
             options: What the player wants.
             sleep: Function used to wait for the game to settle.
@@ -387,7 +390,18 @@ class TourismCampaign:
         plan = self._check_crew(plan)
         if not options.orbit_test:
             mission = plan.mission
-        report = self._fly(mission, lambda: self._orbit_counted(plan))
+        helps = any(hop_helps(t, options.body) for t in plan.tourists)
+        try:
+            report = self._fly(mission, lambda: self._orbit_counted(plan), helps)
+        except NotEnoughDeltaVError as error:
+            # Still on the pad, nothing burnt: recovering it there refunds
+            # the whole launch and brings the tourists back to the space
+            # center, where they keep their accepted contracts.
+            self._recover(vessel)
+            raise CampaignError(
+                f"{error}. The vessel was recovered from the launch pad (full refund); the "
+                "craft needs more delta-v for these tourists"
+            ) from error
         self._recover(vessel)
 
         statuses, delivered = self._wait_for_delivery(plan)

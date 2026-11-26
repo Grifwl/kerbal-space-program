@@ -20,8 +20,9 @@ A suborbital flight goes through these phases:
    vessel rests on the ground or the sea.
 
 An orbital flight is only attempted when KSP's delta-v on the launch pad
-reaches the profile's orbit budget; otherwise the vessel flies a suborbital
-hop, so the tourists at least reach space. It changes the ascent and adds
+reaches the profile's orbit budget. Otherwise the vessel flies a suborbital
+hop when that reaches a destination of someone on board, or does not take
+off at all (``NotEnoughDeltaVError``). It changes the ascent and adds
 three steps between the ascent and the space phase:
 
 * **Ascent**: vertical for the first kilometre, then a gravity turn to
@@ -103,6 +104,14 @@ GRAZING_MARGIN = 10_000.0
 
 class FlightError(RuntimeError):
     """The flight cannot go on (vessel lost, no control, timeout...)."""
+
+
+class NotEnoughDeltaVError(FlightError):
+    """The vessel cannot reach orbit and a hop would help nobody.
+
+    Raised on the launch pad, before anything is ignited: the vessel is
+    still there, whole, and can be recovered for its full cost.
+    """
 
 
 class Phase(Enum):
@@ -205,7 +214,8 @@ class TourismFlightDirector:
         self._max_altitude = 0.0
 
     def fly(self, mission: Mission = Mission.SUBORBITAL,
-            orbit_visited: Callable[[], bool] | None = None) -> FlightReport:
+            orbit_visited: Callable[[], bool] | None = None,
+            hop_helps: bool = True) -> FlightReport:
         """Fly the mission.
 
         Args:
@@ -213,11 +223,16 @@ class TourismFlightDirector:
             orbit_visited: For an orbital flight, tells whether the game
                 already counts the orbit for every tourist on board; the
                 vessel stays in orbit until it does. ``None``: no wait.
+            hop_helps: For an orbital flight, whether a suborbital hop
+                would still reach a destination of someone on board; used
+                when the vessel has too little delta-v for an orbit.
 
         Returns:
             The report, once the vessel rests on the ground or the sea.
 
         Raises:
+            NotEnoughDeltaVError: When an orbit is out of reach and a hop
+                would help nobody; the vessel is still on the pad.
             FlightError: When the vessel is not on the pad, cannot be
                 controlled, is lost, is stranded in orbit or the flight
                 takes too long.
@@ -238,6 +253,14 @@ class TourismFlightDirector:
         self._max_altitude = t.altitude
         delta_v_launch = self._game.read_propulsion().delta_v
         orbit_delta_v_needed: float | None = None
+        if orbital and delta_v_launch < profile.orbit_delta_v and not hop_helps:
+            # Flying would only burn the launch cost: nobody on board has a
+            # destination a hop reaches.
+            raise NotEnoughDeltaVError(
+                f"{t.vessel} has {delta_v_launch:,.0f} m/s of delta-v, not enough for an orbit "
+                f"(about {profile.orbit_delta_v:,.0f} m/s needed), and a suborbital hop would "
+                "reach no destination of the tourists on board"
+            )
         if orbital and delta_v_launch < profile.orbit_delta_v:
             # An orbital ascent spends its fuel sideways: short of an orbit
             # it may not even reach space, and then nobody's destination is

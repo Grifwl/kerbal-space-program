@@ -12,6 +12,7 @@ from ksp_control.application.ports import TourismGamePort
 from ksp_control.application.tourism_flight import (
     FlightError,
     FlightReport,
+    NotEnoughDeltaVError,
     TourismFlightDirector,
 )
 from ksp_control.application.tourism_campaign import (
@@ -797,10 +798,15 @@ class FakeFlight:
         self.reached_orbit = reached_orbit
         self.missions: list[Mission] = []
         self.checks: list = []
+        self.hop_helps: list[bool] = []
+        self.short_of_delta_v = False
 
-    def __call__(self, mission: Mission, orbit_visited) -> FlightReport:
+    def __call__(self, mission: Mission, orbit_visited, hop_helps: bool = True) -> FlightReport:
         self.missions.append(mission)
         self.checks.append(orbit_visited)
+        self.hop_helps.append(hop_helps)
+        if self.short_of_delta_v and mission is Mission.ORBITAL and not hop_helps:
+            raise NotEnoughDeltaVError("Passatgers v1.1 has 3,269 m/s of delta-v")
         orbit = self.reached_orbit and mission is Mission.ORBITAL
         return FlightReport("Passatgers v1.1", self.reached_space, 75_000.0, "splashed",
                             reached_orbit=orbit, delta_v_orbit=None if orbit else 120.0)
@@ -974,6 +980,33 @@ def test_campaign_suborbital_only_leaves_orbital_contracts():
     _campaign(game, target=1_000_000, flight=flight, max_mission=Mission.SUBORBITAL)[0].run()
     assert flight.missions == [Mission.SUBORBITAL]
     assert game.contracts["orb"].status is ContractStatus.OFFERED
+
+
+def test_campaign_stays_on_the_pad_when_a_hop_helps_nobody():
+    """Orbital tourists already went suborbital: no pointless hop."""
+    went_suborbital = [replace(t, visited=(SUBORBITAL,))
+                       for t in _orbital_offers()[0].tourists]
+    orbital = replace(_orbital_offers()[0], status=ContractStatus.ACTIVE,
+                      tourists=tuple(went_suborbital))
+    game = FakeGame([orbital], complete=False)  # a pad recovery completes nothing
+    flight = FakeFlight()
+    flight.short_of_delta_v = True
+    campaign, recovery = _campaign(game, target=1_000_000, flight=flight)
+    with pytest.raises(CampaignError, match="recovered from the launch pad"):
+        campaign.run()
+    assert flight.hop_helps == [False]
+    assert "Passatgers v1.1" in recovery.recovered and "Rover" not in recovery.recovered
+    # Their contract is still open for a better craft.
+    assert game.contracts["orb"].status is ContractStatus.ACTIVE
+
+
+def test_campaign_hops_when_it_still_helps_someone():
+    """A tourist who never went suborbital still gains from a hop."""
+    game = FakeGame(_orbital_offers())
+    flight = FakeFlight()
+    flight.short_of_delta_v = True
+    _campaign(game, target=1_000_000, flight=flight, max_flights=1)[0].run()
+    assert flight.hop_helps == [True]
 
 
 def test_campaign_stops_when_an_orbital_flight_misses_the_orbit():
@@ -1245,6 +1278,14 @@ def test_orbital_flight_circularizes_waits_deorbits_and_lands():
     assert [stage for stage, _ in sim.staged_at] == [4, 3, 2, 1, 0]
     assert altitude[1] > 70_000 and altitude[0] < 20_000
     assert report.delta_v_orbit is not None and report.delta_v_orbit > 39.0
+
+
+def test_orbital_flight_short_of_delta_v_stays_on_the_pad_if_a_hop_helps_nobody():
+    """Nothing is ignited when the flight would reach no destination."""
+    sim = SimulatedOrbit(core_burn=60.0)
+    with pytest.raises(NotEnoughDeltaVError, match="not enough for an orbit"):
+        _director(sim).fly(Mission.ORBITAL, lambda: True, hop_helps=False)
+    assert sim.current_stage == 5 and sim.staged_at == []
 
 
 def test_orbital_flight_short_of_delta_v_on_the_pad_flies_a_hop():
