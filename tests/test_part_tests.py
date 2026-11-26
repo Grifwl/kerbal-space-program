@@ -399,3 +399,56 @@ def test_no_altitude_notice_when_the_game_is_already_satisfied():
     PartTestAssistant(game, AssistantOptions(control_throttle=False), Clock()).tick()
     texts = game.texts(NoticeLevel.ACTION)
     assert texts and all(t.startswith("STAGE NOW") for t in texts)
+
+
+# ------------------------------------------------------------------- kRPC adapter structure
+
+class _Remote:
+    """Minimal stand-in for kRPC remote objects (hashable, attribute bag)."""
+
+    def __init__(self, **attributes) -> None:
+        """Store the attributes."""
+        self.__dict__.update(attributes)
+
+
+def _param(title, completed=False, children=()):
+    """A fake contract parameter."""
+    return _Remote(title=title, completed=completed, children=list(children), notes=None)
+
+
+def _fake_game(contracts):
+    """A KrpcPartTestGame whose connection returns the given contracts."""
+    from ksp_control.adapters.game.krpc_part_tests import KrpcPartTestGame
+    from ksp_control.adapters.game.krpc_connection import KrpcEndpoint
+
+    game = KrpcPartTestGame(KrpcEndpoint())
+    manager = _Remote(active_contracts=contracts)
+    game._conn = _Remote(space_center=_Remote(contract_manager=manager))
+    return game
+
+
+def test_haul_conditions_are_read_next_to_the_objective():
+    """Real haul layout: conditions are siblings; 'Have X' completes early."""
+    haul = _Remote(type="Contracts.Templates.PartTest", title="Transporta Flea", _object_id=5,
+                   parameters=[
+                       _param('Ten Cohete RT-5 "Flea"', completed=True),
+                       _param("Kerbin", True), _param("Volando"),
+                       _param("Alt: 31,000m a 39,000m"), _param("Vel: 350.0m/s a 510.0m/s"),
+                   ])
+    (read,) = _fake_game([haul]).read_test_contracts()
+    assert read.requirement.kind is ObjectiveKind.HAVE
+    assert (read.requirement.altitude, read.requirement.speed) == (Range(31000, 39000),
+                                                                   Range(350, 510))
+    assert read.progress == RequirementProgress(done=False, conditions_met=False)
+
+
+def test_test_conditions_are_read_under_the_objective():
+    """Real test layout: conditions are children of 'Test X'."""
+    test = _Remote(type="Contracts.Templates.PartTest", title="Comprueba", _object_id=6,
+                   parameters=[_param(f"Probar {CHUTE}", children=[
+                       _param("Kerbin", True), _param("Volando", True),
+                       _param("Alt: 2,000m a 8,000m", True), _param("Vel: 140.0m/s a 270.0m/s", True),
+                   ])])
+    (read,) = _fake_game([test]).read_test_contracts()
+    assert read.requirement.altitude == Range(2000, 8000)
+    assert read.progress == RequirementProgress(done=False, conditions_met=True)

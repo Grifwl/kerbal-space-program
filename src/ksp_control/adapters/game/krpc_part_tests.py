@@ -2,6 +2,8 @@
 
 Notes on kRPC 0.8.0 that shape this adapter:
 
+* A test contract nests its conditions under the "Test <part>" objective,
+  a haul contract lists them next to the "Have <part>" objective.
 * Contract objectives are only available as display text; the texts are
   parsed once per contract (``contract_text``) and cached, while the
   completion flags are re-read on every call because the game updates
@@ -38,6 +40,7 @@ from ksp_control.domain.model import GameScene
 from ksp_control.domain.part_tests import (
     EditorState,
     FlightState,
+    ObjectiveKind,
     PartTestRequirement,
     RequirementProgress,
     Situation,
@@ -140,10 +143,15 @@ class KrpcPartTestGame(PartTestGamePort):
                 if cached is None:
                     continue
                 flags = [bool(c.completed) for c in cached.conditions]
+                # "Have <part>" is complete as soon as the part is on board;
+                # the contract is only done when every condition holds too,
+                # and then it leaves the active list. So a haul in this list
+                # is never done.
+                hauled = cached.requirement.kind is ObjectiveKind.HAVE
                 result.append(TestContract(
                     cached.requirement,
                     RequirementProgress(
-                        done=bool(cached.objective.completed),
+                        done=False if hauled else bool(cached.objective.completed),
                         conditions_met=all(flags) if flags else None,
                     ),
                 ))
@@ -185,7 +193,11 @@ class KrpcPartTestGame(PartTestGamePort):
             objectives = list(remote.parameters)
             if objectives:
                 objective = objectives[0]
-                conditions = list(objective.children)
+                # Test contracts nest the conditions under "Test <part>";
+                # haul contracts ("Have <part>") put them next to it, at the
+                # contract level (decompiled PartTest.Generate adds them to
+                # the contract when hauled).
+                conditions = list(objective.children) or objectives[1:]
                 contract_id = str(getattr(remote, "_object_id", id(remote)))
                 requirement = parse_requirement(
                     contract_id,
