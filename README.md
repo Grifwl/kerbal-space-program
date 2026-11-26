@@ -350,7 +350,9 @@ Each flight:
    safe to open (or below 2 km anyway); the game then opens them when it
    is safe. The autopilot keeps the heat shield forward until a canopy
    really opens, then lets go, and physics warp runs under the canopies
-   (`--physics-warp`, `--no-warp`).
+   (`--physics-warp`, `--no-warp`). Landing legs and retractable wheels,
+   if the craft has any, are lowered under the canopies once slower than
+   100 m/s: away from the reentry heat and long before the ground.
 6. **Recovers** the vessel and the pieces of it that landed (same rules as
    `ksp-recover`, but only this craft and its debris; other landed vessels
    are left alone). Recovering the tourists completes their itineraries,

@@ -100,6 +100,9 @@ PERIAPSIS_MARGIN = 1_000.0
 # Without an orbit, a periapsis this far above the deorbit periapsis only
 # grazes the atmosphere: the capsule could skim it for many orbits.
 GRAZING_MARGIN = 10_000.0
+# Landing gear goes down under the canopy once slower than this, in m/s:
+# out of the reentry heat and the fast air, long before the ground.
+GEAR_SPEED = 100.0
 
 
 class FlightError(RuntimeError):
@@ -293,6 +296,7 @@ class TourismFlightDirector:
         limiting = False
         last_ut = t.ut
         released = False
+        gear_down = False
         pitch = 90.0
         reached_space = False
         reached_orbit = False
@@ -435,6 +439,14 @@ class TourismFlightDirector:
                     released = True
                     if profile.warp and profile.physics_warp > 0 and not t.on_ground:
                         self._game.set_physics_warp(profile.physics_warp)
+                if released and not gear_down and not t.on_ground and t.surface_speed < GEAR_SPEED:
+                    # Legs soften the touchdown on land; lowered earlier
+                    # they would face the reentry heat and the fast air.
+                    gear_down = True
+                    lowered = self._game.deploy_landing_gear()
+                    if lowered:
+                        logger.info("Landing gear down at %.0f m, %.0f m/s (%d part(s))",
+                                    t.altitude, t.surface_speed, lowered)
                 if t.on_ground and abs(t.vertical_speed) < 1.0:
                     self._game.set_physics_warp(0)
                     logger.info("%s: %s", t.vessel, t.situation)

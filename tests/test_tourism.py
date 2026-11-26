@@ -397,6 +397,9 @@ class SimulatedHop(TourismGamePort):
     control: bool = True
     throttles: list[float] = field(default_factory=list)
     rcs: list[bool] = field(default_factory=list)
+    # Retractable landing legs, and (altitude, speed) when they went down.
+    legs: int = 0
+    gear_lowered: list[tuple[float, float]] = field(default_factory=list)
     # (altitude, dynamic pressure in Pa) while climbing under power.
     climb_q: list[tuple[float, float]] = field(default_factory=list)
 
@@ -496,6 +499,11 @@ class SimulatedHop(TourismGamePort):
 
     def release_controls(self) -> None:
         self.throttle = 0.0
+
+    def deploy_landing_gear(self) -> int:
+        if self.legs:
+            self.gear_lowered.append((self.altitude, abs(self.vs)))
+        return self.legs
 
     def warp_to(self, ut: float) -> None:
         self.warped = True
@@ -659,6 +667,16 @@ def test_hop_refuses_a_vessel_without_control():
         _director(SimulatedHop(control=False)).fly()
 
 
+def test_hop_lowers_the_landing_legs_under_the_canopy_once():
+    """Down once, slow and in the air: never in the reentry heat."""
+    sim = SimulatedHop(legs=3)
+    report = _director(sim).fly()
+    assert report.situation == "splashed"
+    assert len(sim.gear_lowered) == 1
+    altitude, speed = sim.gear_lowered[0]
+    assert altitude > 0 and speed < 100
+
+
 def test_hop_that_cannot_reach_space_still_lands():
     """Out of fuel below 70 km: chutes anyway, reported as not in space."""
     sim = SimulatedHop(engines=[_Engine(4, 1, 15.0, 20.0)])
@@ -771,6 +789,7 @@ class FakeGame(TourismGamePort):
     def point(self, pitch, heading): raise NotImplementedError
     def hold_retrograde(self): raise NotImplementedError
     def release_controls(self): raise NotImplementedError
+    def deploy_landing_gear(self): raise NotImplementedError
     def warp_to(self, ut): raise NotImplementedError
     def set_physics_warp(self, factor): raise NotImplementedError
     def read_propulsion(self): raise NotImplementedError
@@ -1329,6 +1348,9 @@ class SimulatedOrbit(TourismGamePort):
 
     def release_controls(self) -> None:
         self.throttle = 0.0
+
+    def deploy_landing_gear(self) -> int:
+        return 0
 
     def warp_to(self, ut: float) -> None:
         self.advance(ut - self.t)

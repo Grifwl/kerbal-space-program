@@ -524,6 +524,15 @@ class TourismGamePort(ABC):
         """Disengage the autopilot and leave the throttle at zero."""
 
     @abstractmethod
+    def deploy_landing_gear(self) -> int:
+        """Lower the landing legs and retractable wheels of the vessel.
+
+        Returns:
+            How many parts were lowered; 0 when the vessel has none (or
+            only fixed ones, which need nothing).
+        """
+
+    @abstractmethod
     def warp_to(self, ut: float) -> None:
         """Time warp until a universal time (blocks).
 

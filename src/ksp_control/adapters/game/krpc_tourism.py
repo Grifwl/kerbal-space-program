@@ -564,6 +564,31 @@ class KrpcTourismGame(TourismGamePort):
 
         self._call(write)
 
+    def deploy_landing_gear(self) -> int:
+        """Lower the landing legs and retractable wheels of the vessel.
+
+        Each leg and wheel is deployed one by one rather than through the
+        Gear action group alone: a part left out of the group (it can be
+        edited in the VAB) would stay up. The group is switched on too, so
+        the gear button of the game shows them down.
+
+        Returns:
+            How many parts were lowered; 0 when the vessel has none (or
+            only fixed ones, which need nothing).
+        """
+        def write(conn: Any) -> int:
+            vessel = conn.space_center.active_vessel
+            lowered = 0
+            for gear in (*vessel.parts.legs, *vessel.parts.wheels):
+                if gear.deployable and not gear.deployed:
+                    gear.deployed = True
+                    lowered += 1
+            if lowered:
+                vessel.control.gear = True
+            return lowered
+
+        return int(self._call(write))
+
     def warp_to(self, ut: float) -> None:
         """Time warp until a universal time (blocks).
 
