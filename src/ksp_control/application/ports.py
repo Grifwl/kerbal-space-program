@@ -21,6 +21,7 @@ from ksp_control.domain.tourism import (
     EngineState,
     FlightTelemetry,
     Kerbal,
+    Propulsion,
     TourismContract,
 )
 
@@ -322,8 +323,9 @@ class TourismGamePort(ABC):
     """What the tourism campaign needs from the game.
 
     Covers the space center side (funds, contracts, roster, launching) and
-    the flight side (telemetry and the few controls a suborbital hop
-    needs). Recovering vessels goes through ``FleetPort``.
+    the flight side (telemetry and the controls a suborbital hop or a
+    flight to orbit and back needs, maneuver nodes included). Recovering
+    vessels goes through ``FleetPort``.
     """
 
     # ---------------------------------------------------------- space center
@@ -401,6 +403,18 @@ class TourismGamePort(ABC):
 
         Raises:
             GameUnavailableError: When the game refuses the launch.
+        """
+
+    @abstractmethod
+    def read_crew(self) -> tuple[int, list[str]]:
+        """Read who is on board the active vessel and how many fit.
+
+        Returns:
+            The crew capacity (pilot seat included) and the names of the
+            kerbals on board.
+
+        Raises:
+            GameUnavailableError: When the game cannot be read.
         """
 
     # ---------------------------------------------------------------- flight
@@ -492,6 +506,53 @@ class TourismGamePort(ABC):
 
         Args:
             factor: 0 (normal speed) to 3 (4x).
+        """
+
+    # ------------------------------------------------------------- orbital
+
+    @abstractmethod
+    def read_propulsion(self) -> Propulsion:
+        """Read what the active vessel can still do with its engines.
+
+        Blocks while the game brings its delta-v figures up to date.
+
+        Returns:
+            Thrust, specific impulse, mass and delta-v left.
+        """
+
+    @abstractmethod
+    def add_node(self, ut: float, prograde: float) -> None:
+        """Plan a maneuver node, replacing any other one.
+
+        Args:
+            ut: Universal time of the burn.
+            prograde: Delta-v along the velocity, in m/s (negative:
+                retrograde).
+        """
+
+    @abstractmethod
+    def node_remaining_dv(self) -> float | None:
+        """Read the delta-v still to burn for the maneuver node.
+
+        Returns:
+            The remaining delta-v, in m/s, or ``None`` without a node. It
+            grows again if the burn goes past the node.
+        """
+
+    @abstractmethod
+    def aim_at_node(self) -> None:
+        """Point the vessel along the burn of the maneuver node."""
+
+    @abstractmethod
+    def remove_nodes(self) -> None:
+        """Delete every maneuver node of the active vessel."""
+
+    @abstractmethod
+    def pointing_error(self) -> float:
+        """Angle between where the autopilot aims and where the nose points.
+
+        Returns:
+            Degrees.
         """
 
     @abstractmethod

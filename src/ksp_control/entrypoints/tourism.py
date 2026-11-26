@@ -1,23 +1,25 @@
-"""Fly tourists on suborbital hops until the funds reach a target.
+"""Fly tourists to space (suborbital or orbit) until the funds reach a target.
 
-Each flight accepts the suborbital tourism contracts that fit in the craft,
-launches it with a pilot (taking turns) and the tourists, flies above the
-atmosphere, lands under parachutes, recovers the vessel and its debris and
+Each flight accepts the tourism contracts of Kerbin (suborbital flights and
+orbits) that fill the craft, launches it with a pilot (taking turns) and
+the tourists, flies above the atmosphere (and into orbit when a tourist
+wants it), lands under parachutes, recovers the vessel and its debris and
 starts again. Stop it at any time with Ctrl+C (the vessel in flight is then
 left to you).
 
 Examples:
     See what the next flight would carry, without touching the game::
 
-        ksp-tourism --craft "Passatgers v1.1" --target 500000 --dry-run
+        ksp-tourism --craft "Passatgers v1.2" --target 500000 --dry-run
 
-    Fly a single flight first, to check the craft::
+    Check that the craft reaches orbit and comes back, with suborbital
+    tourists only (no contract at risk if it falls short)::
 
-        ksp-tourism --craft "Passatgers v1.1" --target 500000 --max-flights 1
+        ksp-tourism --craft "Passatgers v1.2" --target 500000 --orbit-test --max-flights 1
 
     Fly until 500,000 funds or no contracts are left::
 
-        ksp-tourism --craft "Passatgers v1.1" --target 500000
+        ksp-tourism --craft "Passatgers v1.2" --target 500000
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from ksp_control.adapters.game.krpc_connection import KrpcEndpoint
 from ksp_control.adapters.game.krpc_fleet import KrpcFleet
 from ksp_control.adapters.game.krpc_tourism import KrpcTourismGame
 from ksp_control.application.ports import GameUnavailableError
-from ksp_control.application.suborbital_flight import FlightError, SuborbitalFlightDirector
+from ksp_control.application.tourism_flight import FlightError, TourismFlightDirector
 from ksp_control.application.tourism_campaign import (
     CampaignError,
     CampaignOptions,
@@ -38,7 +40,7 @@ from ksp_control.application.tourism_campaign import (
     TourismCampaign,
 )
 from ksp_control.application.vessel_recovery import VesselRecoveryService
-from ksp_control.domain.tourism import FlightProfile, choose_pilot
+from ksp_control.domain.tourism import FlightProfile, Mission, choose_pilot, contract_mission
 
 logger = logging.getLogger("ksp_control.tourism")
 
@@ -53,21 +55,45 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         The parsed options.
     """
     parser = argparse.ArgumentParser(
-        description="Fly suborbital tourism contracts in a loop until the funds reach a target."
+        description="Fly tourism contracts (suborbital and orbital) in a loop until the funds "
+                    "reach a target."
     )
     parser.add_argument("--craft", required=True,
                         help="Name of the VAB craft to launch, e.g. \"Passatgers v1.1\".")
     parser.add_argument("--target", type=float, required=True,
                         help="Stop when the funds reach this amount.")
-    parser.add_argument("--seats", type=int, default=4,
-                        help="Passenger seats of the craft, pilot excluded (default: 4).")
+    parser.add_argument("--seats", type=int, default=None,
+                        help="Passenger seats of the craft, pilot excluded, for the first "
+                             "flight; every launch reads the real number from the craft for "
+                             "the next flights (default: 4).")
     parser.add_argument("--pilot", action="append", default=[], metavar="NAME",
                         help="Pilot to use; repeat to take turns in that order "
                              "(default: every hired pilot, in turns).")
     parser.add_argument("--max-flights", type=int, default=None,
                         help="Stop after this many flights.")
+    parser.add_argument("--suborbital-only", action="store_true",
+                        help="Never board tourists that want an orbit (for a craft that cannot "
+                             "reach orbit).")
+    parser.add_argument("--orbit-test", action="store_true",
+                        help="Fly to orbit and back, but board only suborbital tourists: checks "
+                             "the craft without risking a contract.")
     parser.add_argument("--apoapsis", type=float, default=75_000.0,
-                        help="Target apoapsis in metres; must be above 70,000 (default: 75,000).")
+                        help="Target apoapsis of a suborbital hop in metres; must be above "
+                             "70,000 (default: 75,000).")
+    parser.add_argument("--orbit", type=float, default=80_000.0,
+                        help="Altitude of the orbit in metres; must be above 70,000 "
+                             "(default: 80,000).")
+    parser.add_argument("--turn-shape", type=float, default=1.0,
+                        help="Shape of the orbital gravity turn, which goes from vertical at "
+                             "1 km to horizontal when the apoapsis reaches --orbit: 1 = tilt in "
+                             "proportion to the apoapsis rise, lower = tilt sooner (cheaper "
+                             "circularization, but more time fast in thick, hot air) "
+                             "(default: 1).")
+    parser.add_argument("--orbit-delta-v", type=float, default=3_600.0,
+                        help="Vacuum delta-v the craft needs on the pad to try an orbit, in m/s; "
+                             "with less it flies a suborbital hop (default: 3,600).")
+    parser.add_argument("--deorbit-periapsis", type=float, default=35_000.0,
+                        help="Periapsis of the deorbit burn, in metres (default: 35,000).")
     parser.add_argument("--pitch", type=float, default=80.0,
                         help="Pitch reached at 10 km after a gradual turn from vertical at 1 km; "
                              "90 = straight up, lower = lands further east (default: 80).")
@@ -79,6 +105,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-drag", type=float, default=1.0,
                         help="Throttle down while the drag exceeds this multiple of the "
                              "weight; 1 = climb at terminal velocity, 0 = never (default: 1).")
+    parser.add_argument("--max-heat", type=float, default=80.0,
+                        help="Throttle down while the hottest part is above this percentage of "
+                             "the temperature it withstands; 0 = never (default: 80).")
     parser.add_argument("--min-throttle", type=float, default=0.1,
                         help="Lowest throttle the air limits may set (default: 0.1).")
     parser.add_argument("--no-warp", action="store_true",
@@ -94,9 +123,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.apoapsis <= 70_000:
         parser.error("--apoapsis must be above 70,000 m, where space begins at Kerbin")
+    if args.orbit <= 70_000:
+        parser.error("--orbit must be above 70,000 m, where space begins at Kerbin")
+    if not 0 < args.deorbit_periapsis < 70_000:
+        parser.error("--deorbit-periapsis must be inside the atmosphere (0 to 70,000 m)")
+    if not 0 < args.turn_shape <= 2:
+        parser.error("--turn-shape must be between 0 and 2")
+    if args.suborbital_only and args.orbit_test:
+        parser.error("--orbit-test and --suborbital-only exclude each other")
     if not 0.0 <= args.min_throttle <= 1.0:
         parser.error("--min-throttle must be between 0 and 1")
-    if args.seats < 1:
+    if args.seats is not None and args.seats < 1:
         parser.error("--seats must be at least 1")
     return args
 
@@ -112,9 +149,15 @@ def format_summary(summary: FlightSummary) -> str:
     """
     report = summary.report
     waiting = f", {summary.waiting} waiting for a later flight" if summary.waiting else ""
+    orbit = ""
+    if summary.mission is Mission.ORBITAL:
+        left = ("" if report.delta_v_orbit is None
+                else f", {report.delta_v_orbit:,.0f} m/s left in orbit")
+        orbit = f" (orbit {'reached' if report.reached_orbit else 'NOT reached'}{left})"
     return (
-        f"Flight {summary.number} ({summary.pilot}): {report.situation} after "
-        f"{report.max_altitude:,.0f} m; {summary.delivered}/{summary.tourists} tourist(s) "
+        f"Flight {summary.number} ({summary.pilot}, {summary.mission.label}): "
+        f"{report.situation} after {report.max_altitude:,.0f} m{orbit}; "
+        f"{summary.delivered}/{summary.tourists} tourist(s) "
         f"delivered, {summary.completed}/{len(summary.contracts)} contract(s) completed"
         f"{waiting}. Launch -{summary.launch_cost:,.0f}, contracts "
         f"+{summary.contract_rewards:,.0f}, recovery and other {summary.vessel_recovery:+,.0f}: "
@@ -155,14 +198,21 @@ def main(argv: list[str] | None = None) -> int:
         max_dynamic_pressure=args.max_q * 1000.0,
         max_drag_ratio=args.max_drag,
         min_throttle=args.min_throttle,
+        max_heat_ratio=args.max_heat / 100.0,
+        orbit_delta_v=args.orbit_delta_v,
+        orbit_apoapsis=args.orbit,
+        orbit_turn_shape=args.turn_shape,
+        deorbit_periapsis=args.deorbit_periapsis,
     )
-    director = SuborbitalFlightDirector(game, profile)
+    director = TourismFlightDirector(game, profile)
     options = CampaignOptions(
         craft=args.craft,
         target_funds=args.target,
         seats=args.seats,
         pilots=tuple(args.pilot),
         max_flights=args.max_flights,
+        max_mission=Mission.SUBORBITAL if args.suborbital_only else Mission.ORBITAL,
+        orbit_test=args.orbit_test,
     )
     campaign = TourismCampaign(game, director.fly, recovery, options)
     try:
@@ -224,7 +274,9 @@ def _dry_run(game: KrpcTourismGame, campaign: TourismCampaign, options: Campaign
     print(f"Tourism contracts: {len(contracts)}")
     for contract in contracts:
         tourists = ", ".join(t.kerbal or f"? ({t.itinerary})" for t in contract.tourists)
-        print(f"  [{contract.status.value}] {contract.title} - {tourists} - "
+        mission = contract_mission(contract, options.body)
+        kind = mission.label if mission is not None else "cannot fly"
+        print(f"  [{contract.status.value}, {kind}] {contract.title} - {tourists} - "
               f"{contract.reward:,.0f} funds")
         for tourist in contract.tourists:
             done = " (delivered)" if tourist.completed else ""
@@ -234,8 +286,11 @@ def _dry_run(game: KrpcTourismGame, campaign: TourismCampaign, options: Campaign
         print("Next flight: nothing to fly.")
         return 0
     pilot = choose_pilot(game.roster(), 0, options.pilots)
-    print(f"Next flight: pilot {pilot or '(none available!)'}, "
-          f"{plan.seats_used}/{options.seats} seat(s), {plan.reward:,.0f} funds")
+    seats_note = "" if options.seats is not None else " (assumed: give --seats if it differs)"
+    mission = Mission.ORBITAL if options.orbit_test else plan.mission
+    print(f"Next flight ({mission.label}{', orbit test' if options.orbit_test else ''}): "
+          f"pilot {pilot or '(none available!)'}, "
+          f"{plan.seats_used}/{campaign.seats} seat(s){seats_note}, {plan.reward:,.0f} funds")
     for label, boardings in (("already accepted", plan.carry), ("to accept", plan.accept)):
         for boarding in boardings:
             names = ", ".join(t.kerbal or t.itinerary for t in boarding.tourists)

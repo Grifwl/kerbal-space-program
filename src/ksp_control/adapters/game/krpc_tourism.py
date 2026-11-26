@@ -21,6 +21,10 @@ Spanish game):
   (0.8 has no ``engage``/``disengage`` methods any more).
 * ``Parachute.safe_state`` is the game's own "safe to open" rating (the
   colour of the staging icon).
+* ``Vessel.recalculate_delta_v`` brings KSP's own delta-v figures up to
+  date (they are computed over several frames) before reading them.
+* Maneuver nodes: ``Node.reference_frame`` has its y axis along the burn,
+  so aiming the autopilot at (0, 1, 0) in that frame follows the node.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import time
 from typing import Any
 
 from ksp_control.adapters.game.krpc_connection import (
@@ -44,6 +49,7 @@ from ksp_control.domain.tourism import (
     EngineState,
     FlightTelemetry,
     Kerbal,
+    Propulsion,
     Tourist,
     TourismContract,
     match_kerbal,
@@ -56,6 +62,10 @@ TOURISM_CONTRACT_TYPE = "FinePrint.Contracts.TourismContract"
 # Above this pitch the autopilot aims at the zenith: kRPC documents the
 # heading as ill-defined near the vertical.
 VERTICAL_PITCH = 89.5
+
+# Seconds between two readings of the part temperatures: two calls per
+# part, and temperatures change slowly.
+HEAT_INTERVAL = 1.0
 
 
 def craft_file_name(craft: str, available: list[str]) -> str | None:
@@ -137,8 +147,12 @@ class KrpcTourismGame(TourismGamePort):
         self._chutes: tuple[Any, int, int | None] | None = None
         # Engine -> decouple stage of its part; it never changes.
         self._decouple_stage: dict[Any, int] = {}
-        # Body name -> (atmosphere depth, gravitational parameter).
-        self._bodies: dict[str, tuple[float, float]] = {}
+        # Body name -> (atmosphere depth, gravitational parameter, radius).
+        self._bodies: dict[str, tuple[float, float, float]] = {}
+        # Part -> (max temperature, max skin temperature); never change.
+        self._max_temperatures: dict[Any, tuple[float, float]] = {}
+        # (monotonic time, heat ratio) of the last temperature reading.
+        self._heat: tuple[float, float] = (float("-inf"), 0.0)
 
     # ---------------------------------------------------------- space center
 
@@ -182,6 +196,11 @@ class KrpcTourismGame(TourismGamePort):
                         kerbal=match_kerbal(str(itinerary.title), tourist_names),
                         reward=_total_funds([itinerary]),
                         completed=bool(itinerary.completed),
+                        # The game marks each destination as soon as it is
+                        # reached, before the recovery completes the
+                        # itinerary: that tells when an orbit counts.
+                        visited=tuple(str(d.title) for d in itinerary.children
+                                      if bool(d.completed)),
                     )
                     for itinerary in itineraries
                 )
@@ -269,6 +288,18 @@ class KrpcTourismGame(TourismGamePort):
 
         return self._call(launch)
 
+    def read_crew(self) -> tuple[int, list[str]]:
+        """Read who is on board the active vessel and how many fit.
+
+        Returns:
+            The crew capacity and the names of the kerbals on board.
+        """
+        def read(conn: Any) -> tuple[int, list[str]]:
+            vessel = conn.space_center.active_vessel
+            return int(vessel.crew_capacity), [str(k.name) for k in vessel.crew]
+
+        return self._call(read)
+
     # ---------------------------------------------------------------- flight
 
     def read_flight(self) -> FlightTelemetry | None:
@@ -289,14 +320,16 @@ class KrpcTourismGame(TourismGamePort):
             body_name = str(body.name)
             if body_name not in self._bodies:
                 self._bodies[body_name] = (float(body.atmosphere_depth),
-                                           float(body.gravitational_parameter))
-            atmosphere, mu = self._bodies[body_name]
+                                           float(body.gravitational_parameter),
+                                           float(body.equatorial_radius))
+            atmosphere, mu, body_radius = self._bodies[body_name]
             # The body's rotating frame gives surface-relative speeds.
             flight = vessel.flight(body.reference_frame)
             stage = int(vessel.control.current_stage)
             # Drag is a vector; its length does not depend on the frame.
             drag = math.sqrt(sum(c * c for c in flight.drag))
             radius = float(orbit.radius)
+            mass = float(vessel.mass)
             return FlightTelemetry(
                 vessel=str(vessel.name),
                 situation=_enum_name(vessel.situation),
@@ -311,11 +344,54 @@ class KrpcTourismGame(TourismGamePort):
                 atmosphere_depth=atmosphere,
                 drag=drag,
                 # Local weight: m * mu / r^2 (gravity weakens with height).
-                weight=float(vessel.mass) * mu / (radius * radius),
+                weight=mass * mu / (radius * radius),
                 dynamic_pressure=float(flight.dynamic_pressure),
+                periapsis=float(orbit.periapsis_altitude),
+                semi_major_axis=float(orbit.semi_major_axis),
+                eccentricity=float(orbit.eccentricity),
+                radius=radius,
+                time_to_periapsis=float(orbit.time_to_periapsis),
+                period=float(orbit.period),
+                mu=mu,
+                body_radius=body_radius,
+                thrust=float(vessel.available_thrust),
+                mass=mass,
+                heat_ratio=self._heat_ratio(vessel),
             )
 
         return self._call(read)
+
+    def _heat_ratio(self, vessel: Any) -> float:
+        """Temperature of the hottest part over its limit (cached for a second).
+
+        Args:
+            vessel: Remote active vessel.
+
+        Returns:
+            The highest of temperature / max temperature and skin
+            temperature / max skin temperature over every part.
+        """
+        now = time.monotonic()
+        if now - self._heat[0] < HEAT_INTERVAL:
+            return self._heat[1]
+        worst = 0.0
+        for part in vessel.parts.all:
+            try:
+                if part not in self._max_temperatures:
+                    self._max_temperatures[part] = (float(part.max_temperature),
+                                                    float(part.max_skin_temperature))
+                limit, skin_limit = self._max_temperatures[part]
+                if limit > 0:
+                    worst = max(worst, float(part.temperature) / limit)
+                if skin_limit > 0:
+                    worst = max(worst, float(part.skin_temperature) / skin_limit)
+            except RECOVERABLE_ERRORS as error:
+                # A part decoupled or destroyed while being read: skip it.
+                # A broken connection is still a failure of the whole read.
+                if is_connection_problem(error):
+                    raise
+        self._heat = (now, worst)
+        return worst
 
     def _parachute_stage(self, vessel: Any, stage: int) -> int | None:
         """Highest activation stage of the vessel's parachutes (cached).
@@ -465,6 +541,80 @@ class KrpcTourismGame(TourismGamePort):
 
         self._call(write)
 
+    # ------------------------------------------------------------- orbital
+
+    def read_propulsion(self) -> Propulsion:
+        """Read what the active vessel can still do with its engines.
+
+        Returns:
+            Thrust, vacuum specific impulse, mass and vacuum delta-v left.
+        """
+        def read(conn: Any) -> Propulsion:
+            vessel = conn.space_center.active_vessel
+            # Blocks until KSP's figures are current (a few frames).
+            vessel.recalculate_delta_v()
+            return Propulsion(
+                thrust=float(vessel.available_thrust),
+                isp=float(vessel.vacuum_specific_impulse),
+                mass=float(vessel.mass),
+                delta_v=float(vessel.vacuum_delta_v),
+            )
+
+        return self._call(read)
+
+    def add_node(self, ut: float, prograde: float) -> None:
+        """Plan a maneuver node, replacing any other one.
+
+        Args:
+            ut: Universal time of the burn.
+            prograde: Delta-v along the velocity, in m/s.
+        """
+        def write(conn: Any) -> None:
+            control = conn.space_center.active_vessel.control
+            control.remove_nodes()
+            control.add_node(float(ut), prograde=float(prograde))
+
+        self._call(write)
+
+    def node_remaining_dv(self) -> float | None:
+        """Read the delta-v still to burn for the first maneuver node.
+
+        Returns:
+            The remaining delta-v in m/s, or ``None`` without a node.
+        """
+        def read(conn: Any) -> float | None:
+            nodes = list(conn.space_center.active_vessel.control.nodes)
+            return float(nodes[0].remaining_delta_v) if nodes else None
+
+        return self._call(read)
+
+    def aim_at_node(self) -> None:
+        """Point the vessel along the burn of the first maneuver node."""
+        def write(conn: Any) -> None:
+            vessel = conn.space_center.active_vessel
+            nodes = list(vessel.control.nodes)
+            if not nodes:
+                return
+            autopilot = vessel.auto_pilot
+            # Frame first, then target (see ``point``); +y is the burn.
+            autopilot.reference_frame = nodes[0].reference_frame
+            autopilot.target_direction = (0.0, 1.0, 0.0)
+            autopilot.engaged = True
+
+        self._call(write)
+
+    def remove_nodes(self) -> None:
+        """Delete every maneuver node of the active vessel."""
+        self._call(lambda conn: conn.space_center.active_vessel.control.remove_nodes())
+
+    def pointing_error(self) -> float:
+        """Angle between the autopilot's target and the nose.
+
+        Returns:
+            Degrees.
+        """
+        return self._call(lambda conn: float(conn.space_center.active_vessel.auto_pilot.error))
+
     # ------------------------------------------------------------- plumbing
 
     def close(self) -> None:
@@ -477,6 +627,8 @@ class KrpcTourismGame(TourismGamePort):
         self._conn = None
         self._contracts.clear()
         self._decouple_stage.clear()
+        self._max_temperatures.clear()
+        self._heat = (float("-inf"), 0.0)
         self._chutes = None
 
     def _call(self, action: Any) -> Any:

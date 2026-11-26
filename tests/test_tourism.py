@@ -1,4 +1,4 @@
-"""Tests of the suborbital tourism rules, flight director and campaign."""
+"""Tests of the tourism rules, flight director (suborbital and orbital) and campaign."""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ import pytest
 
 from ksp_control.adapters.game.krpc_tourism import craft_file_name
 from ksp_control.application.ports import TourismGamePort
-from ksp_control.application.suborbital_flight import (
+from ksp_control.application.tourism_flight import (
     FlightError,
     FlightReport,
-    SuborbitalFlightDirector,
+    TourismFlightDirector,
 )
 from ksp_control.application.tourism_campaign import (
     CampaignError,
@@ -28,16 +28,25 @@ from ksp_control.domain.tourism import (
     FlightProfile,
     FlightTelemetry,
     Kerbal,
+    Mission,
+    Propulsion,
     Tourist,
     TourismContract,
+    apsis_burn_dv,
+    burn_throttle,
+    burn_time,
     choose_pilot,
-    is_suborbital_hop,
+    contract_mission,
+    destination_mission,
     match_kerbal,
+    orbit_visited,
     plan_passengers,
     should_stage_on_ascent,
+    time_to_radius,
 )
 
 SUBORBITAL = "Vuelo espacial suborbital en Kerbin"
+ORBIT = "Orbita alrededor de Kerbin"
 
 
 def contract(cid: str, names: list[str], status=ContractStatus.OFFERED, reward=None,
@@ -80,13 +89,45 @@ def five() -> list[str]:
 # ------------------------------------------------------------------ domain
 
 
-def test_only_suborbital_kerbin_itineraries_are_hops():
-    """A single other destination rules the contract out."""
-    assert is_suborbital_hop(contract("a", ["Samroda Kerman"]))
-    assert is_suborbital_hop(contract("a", ["X Kerman"], destinations=("Suborbital spaceflight at Kerbin",)))
-    assert not is_suborbital_hop(contract("b", ["X Kerman"], destinations=(SUBORBITAL, "Sobrevuelo de Mun")))
-    assert not is_suborbital_hop(contract("c", ["X Kerman"], destinations=("Vuelo espacial suborbital en Mun",)))
-    assert not is_suborbital_hop(contract("d", []))
+def test_destinations_are_classified_by_mission():
+    """Suborbital and orbit of Kerbin, in Spanish or English, with accents."""
+    assert destination_mission(SUBORBITAL) is Mission.SUBORBITAL
+    assert destination_mission("Suborbital spaceflight at Kerbin") is Mission.SUBORBITAL
+    assert destination_mission(ORBIT) is Mission.ORBITAL
+    assert destination_mission("Órbita alrededor de Kerbin") is Mission.ORBITAL
+    assert destination_mission("Orbit Kerbin") is Mission.ORBITAL
+    assert destination_mission("Orbita alrededor de Mun") is None
+    assert destination_mission("Vuelo espacial suborbital en Mun") is None
+    assert destination_mission("Sobrevuelo de Mun") is None
+
+
+def test_contracts_need_the_mission_of_their_most_demanding_tourist():
+    """One orbit makes the contract orbital; one flyby rules it out."""
+    assert contract_mission(contract("a", ["Samroda Kerman"])) is Mission.SUBORBITAL
+    assert contract_mission(contract("b", ["X Kerman"], destinations=(SUBORBITAL, ORBIT))) \
+        is Mission.ORBITAL
+    mixed = TourismContract("m", "Mixed", ContractStatus.OFFERED, (
+        Tourist("Itinerario de viaje de Jebtono", (SUBORBITAL, ORBIT), "Jebtono Kerman"),
+        Tourist("Itinerario de viaje de Bobneio", (ORBIT,), "Bobneio Kerman"),
+    ))
+    assert contract_mission(mixed) is Mission.ORBITAL
+    assert contract_mission(contract("c", ["X Kerman"], destinations=(SUBORBITAL, "Sobrevuelo de Mun"))) is None
+    assert contract_mission(contract("d", [])) is None
+    # Only the tourists still waiting count.
+    split = TourismContract("s", "Split", ContractStatus.ACTIVE, (
+        Tourist("Itinerario de viaje de A", (ORBIT,), "A Kerman", completed=True),
+        Tourist("Itinerario de viaje de B", (SUBORBITAL,), "B Kerman"),
+    ))
+    assert contract_mission(split) is Mission.SUBORBITAL
+
+
+def test_orbit_visited_follows_the_destination_flags():
+    """Only orbit destinations matter; a suborbital tourist is always done."""
+    tourist = Tourist("Itinerario de viaje de A", (SUBORBITAL, ORBIT), "A Kerman")
+    assert not orbit_visited(tourist)
+    assert not orbit_visited(replace(tourist, visited=(SUBORBITAL,)))
+    assert orbit_visited(replace(tourist, visited=(ORBIT,)))
+    assert orbit_visited(Tourist("Itinerario de viaje de B", (SUBORBITAL,), "B Kerman"))
 
 
 def test_tourists_are_matched_by_first_name():
@@ -193,6 +234,20 @@ def test_plan_finishes_the_smallest_accepted_contracts_first():
     assert plan.carry[1].waiting == 3
 
 
+def test_plan_mixes_suborbital_and_orbital_tourists():
+    """The flight is orbital as soon as one tourist on board wants an orbit."""
+    orbital = contract("orb", ["A Kerman", "B Kerman"], reward=65_000,
+                       destinations=(SUBORBITAL, ORBIT))
+    hop = contract("hop", ["C Kerman", "D Kerman"])
+    plan = plan_passengers([orbital, hop], seats=4, available=set())
+    assert set(ids(plan.accept)) == {"orb", "hop"} and plan.mission is Mission.ORBITAL
+    assert plan_passengers([hop], seats=4, available=set()).mission is Mission.SUBORBITAL
+    # A craft limited to suborbital hops leaves the orbital tourists alone.
+    plan = plan_passengers([orbital, hop], seats=4, available=set(),
+                           max_mission=Mission.SUBORBITAL)
+    assert ids(plan.accept) == ["hop"] and plan.mission is Mission.SUBORBITAL
+
+
 def test_pilots_take_turns_and_unavailable_ones_are_skipped():
     """Rotation over the hired pilots, in name order unless given."""
     roster = [Kerbal("Valentina Kerman", "crew", "Pilot", True),
@@ -204,6 +259,56 @@ def test_pilots_take_turns_and_unavailable_ones_are_skipped():
     assert choose_pilot(roster, 0, ("Valentina Kerman",)) == "Valentina Kerman"
     roster[1] = Kerbal("Jebediah Kerman", "crew", "Pilot", False)
     assert choose_pilot(roster, 0) == "Valentina Kerman"
+
+
+KERBIN_MU = 3.5316e12
+KERBIN_RADIUS = 600_000.0
+
+
+def test_apsis_burns_circularize_and_deorbit():
+    """Vis-viva numbers for a Kerbin orbit at 80 km."""
+    apo = KERBIN_RADIUS + 80_000
+    # Already circular: nothing to do.
+    assert apsis_burn_dv(KERBIN_MU, apo, apo, apo) == pytest.approx(0.0)
+    # From the top of a hop that skims the surface to a circular orbit.
+    hop_a = (apo + KERBIN_RADIUS) / 2
+    circular_speed = math.sqrt(KERBIN_MU / apo)
+    assert apsis_burn_dv(KERBIN_MU, apo, hop_a, apo) == pytest.approx(
+        circular_speed - math.sqrt(KERBIN_MU * (2 / apo - 1 / hop_a)))
+    assert 2_200 < circular_speed < 2_300
+    # Deorbiting to a 35 km periapsis is a small retrograde burn.
+    deorbit = apsis_burn_dv(KERBIN_MU, apo, apo, KERBIN_RADIUS + 35_000)
+    assert -45 < deorbit < -35
+
+
+def test_burn_time_follows_the_rocket_equation():
+    """The vessel gets lighter, so the burn is shorter than dv / a."""
+    # 1,000 m/s with 100 kN on 10 t and Isp 300 s.
+    seconds = burn_time(1_000.0, 100_000.0, 300.0, 10_000.0)
+    exhaust = 300.0 * 9.80665
+    assert seconds == pytest.approx(10_000 * (1 - math.exp(-1_000 / exhaust)) * exhaust / 100_000)
+    assert seconds < 1_000.0 / (100_000.0 / 10_000.0)
+    assert burn_time(-1_000.0, 100_000.0, 300.0, 10_000.0) == seconds
+    assert burn_time(100.0, 0.0, 300.0, 10_000.0) == math.inf
+    # Full power while far from the target, easing off at the end.
+    assert burn_throttle(500.0, 100_000.0, 10_000.0) == 1.0
+    assert burn_throttle(5.0, 100_000.0, 10_000.0) == pytest.approx(0.25)
+    assert burn_throttle(0.1, 100_000.0, 10_000.0) == 0.05
+
+
+def test_time_to_radius_matches_a_simulated_fall():
+    """The prediction agrees with integrating the trajectory."""
+    sim = SimulatedOrbit(launched=True)
+    # 75 km up, climbing steeply with some eastward speed: a suborbital arc.
+    sim.y, sim.vx, sim.vy = KERBIN_RADIUS + 75_000, 1_200.0, 600.0
+    t = sim.read_flight()
+    predicted = time_to_radius(KERBIN_MU, t.semi_major_axis, t.eccentricity, t.radius, True,
+                               KERBIN_RADIUS + 70_000)
+    while not (sim.altitude() < 70_000 and sim.vertical_speed() < 0):
+        sim.advance(0.5)
+    assert predicted == pytest.approx(sim.t, abs=1.0)
+    assert time_to_radius(KERBIN_MU, t.semi_major_axis, t.eccentricity, t.radius, True,
+                          KERBIN_RADIUS + 900_000) is None  # never that high
 
 
 def test_staging_waits_for_every_dropped_engine():
@@ -387,7 +492,17 @@ class SimulatedHop(TourismGamePort):
     def set_physics_warp(self, factor: int) -> None:
         self.physics_warp = factor
 
-    # Unused by the director.
+    def read_propulsion(self) -> Propulsion:
+        left = sum(e.thrust * e.burn_time for e in self.engines if e.attached)
+        return Propulsion(thrust=10.0, isp=300.0, mass=1.0, delta_v=left)
+
+    # Unused by a suborbital hop.
+    def read_crew(self): raise NotImplementedError
+    def add_node(self, ut, prograde): raise NotImplementedError
+    def node_remaining_dv(self): raise NotImplementedError
+    def aim_at_node(self): raise NotImplementedError
+    def remove_nodes(self): raise NotImplementedError
+    def pointing_error(self): raise NotImplementedError
     def funds(self) -> float: raise NotImplementedError
     def read_tourism_contracts(self): raise NotImplementedError
     def accept_contract(self, contract_id): raise NotImplementedError
@@ -397,7 +512,7 @@ class SimulatedHop(TourismGamePort):
     def close(self) -> None: pass
 
 
-def _director(sim: SimulatedHop, **profile) -> SuborbitalFlightDirector:
+def _director(sim: TourismGamePort, **profile) -> TourismFlightDirector:
     """A director whose waits advance the simulation."""
     clock = {"now": 0.0}
 
@@ -405,8 +520,8 @@ def _director(sim: SimulatedHop, **profile) -> SuborbitalFlightDirector:
         clock["now"] += seconds
         sim.advance(seconds)
 
-    return SuborbitalFlightDirector(sim, FlightProfile(**profile), interval=0.2,
-                                    sleep=sleep, clock=lambda: clock["now"])
+    return TourismFlightDirector(sim, FlightProfile(**profile), interval=0.2,
+                                 sleep=sleep, clock=lambda: clock["now"])
 
 
 def test_hop_reaches_space_jettisons_and_lands():
@@ -469,6 +584,11 @@ def test_air_limited_throttle_rule():
     assert rule(0.12, q=200_000, dt=1.0) == 0.1               # never below the floor
     assert rule(0.99, dt=1.0) == 1.0
     assert rule(0.3, q=90_000, drag=9.0, max_q=0, max_drag=0) == 1.0  # both disabled
+    # The heat limit: hottest part at 96% with 80% allowed is 1.2 times over.
+    assert air_limited_throttle(1.0, 0.0, 20_000.0, 0.0, 1.0, 1.0, 0.2,
+                                heat_ratio=0.96, max_heat_ratio=0.8) == pytest.approx(0.96)
+    assert air_limited_throttle(1.0, 0.0, 20_000.0, 0.0, 1.0, 1.0, 0.2,
+                                heat_ratio=0.96, max_heat_ratio=0.0) == 1.0
 
 
 class _EvaHop(SimulatedHop):
@@ -537,11 +657,13 @@ class FakeGame(TourismGamePort):
     """Space center side of the game: contracts, roster and funds."""
 
     def __init__(self, contracts: list[TourismContract], funds: float = 100_000.0,
-                 complete: bool = True) -> None:
+                 complete: bool = True, capacity: int = 5) -> None:
         self.contracts = {c.contract_id: c for c in contracts}
         self._funds = funds
         self.complete = complete
+        self.capacity = capacity  # pilot seat included
         self.launches: list[tuple[str, list[str]]] = []
+        self.aboard: list[str] = []
         self.pilots = [Kerbal("Jebediah Kerman", "crew", "Pilot", True),
                        Kerbal("Valentina Kerman", "crew", "Pilot", True)]
 
@@ -569,6 +691,7 @@ class FakeGame(TourismGamePort):
 
     def launch(self, craft: str, crew: list[str]) -> str:
         self.launches.append((craft, crew))
+        self.aboard = crew[:self.capacity]  # who does not fit stays behind
         self._funds -= 12_000  # the vessel is paid at launch
         return "Passatgers v1.1"
 
@@ -580,7 +703,7 @@ class FakeGame(TourismGamePort):
         """
         if not self.complete:
             return
-        on_board = set(self.launches[-1][1])
+        on_board = set(self.aboard)
         for cid, c in list(self.contracts.items()):
             if c.status is not ContractStatus.ACTIVE:
                 continue
@@ -593,6 +716,9 @@ class FakeGame(TourismGamePort):
             status = (ContractStatus.COMPLETED if all(t.completed for t in tourists)
                       else ContractStatus.ACTIVE)
             self.contracts[cid] = replace(c, status=status, tourists=tuple(tourists))
+
+    def read_crew(self) -> tuple[int, list[str]]:
+        return self.capacity, list(self.aboard)
 
     def read_flight(self) -> FlightTelemetry | None:
         return self.flight
@@ -610,6 +736,12 @@ class FakeGame(TourismGamePort):
     def release_controls(self): raise NotImplementedError
     def warp_to(self, ut): raise NotImplementedError
     def set_physics_warp(self, factor): raise NotImplementedError
+    def read_propulsion(self): raise NotImplementedError
+    def add_node(self, ut, prograde): raise NotImplementedError
+    def node_remaining_dv(self): raise NotImplementedError
+    def aim_at_node(self): raise NotImplementedError
+    def remove_nodes(self): raise NotImplementedError
+    def pointing_error(self): raise NotImplementedError
     def close(self) -> None: pass
 
 
@@ -642,10 +774,28 @@ class FakeRecovery:
         pass
 
 
-def _campaign(game: FakeGame, target: float, reached_space: bool = True, **options):
+class FakeFlight:
+    """Stands in for ``TourismFlightDirector.fly``; remembers each order."""
+
+    def __init__(self, reached_space: bool = True, reached_orbit: bool = True) -> None:
+        self.reached_space = reached_space
+        self.reached_orbit = reached_orbit
+        self.missions: list[Mission] = []
+        self.checks: list = []
+
+    def __call__(self, mission: Mission, orbit_visited) -> FlightReport:
+        self.missions.append(mission)
+        self.checks.append(orbit_visited)
+        orbit = self.reached_orbit and mission is Mission.ORBITAL
+        return FlightReport("Passatgers v1.1", self.reached_space, 75_000.0, "splashed",
+                            reached_orbit=orbit, delta_v_orbit=None if orbit else 120.0)
+
+
+def _campaign(game: FakeGame, target: float, reached_space: bool = True,
+              flight: FakeFlight | None = None, **options):
     """A campaign with a fake flight and recovery."""
     recovery = FakeRecovery(game, ["Passatgers v1.1", "Escombros de Passatgers v1.1", "Rover"])
-    fly = lambda: FlightReport("Passatgers v1.1", reached_space, 75_000.0, "splashed")  # noqa: E731
+    fly = flight or FakeFlight(reached_space)
     campaign = TourismCampaign(game, fly, recovery,
                                CampaignOptions("Passatgers v1.1", target, **options),
                                sleep=lambda s: None)
@@ -696,6 +846,38 @@ def test_campaign_flies_a_contract_bigger_than_the_craft_in_two_flights():
     assert all(c.status is ContractStatus.COMPLETED for c in game.contracts.values())
 
 
+def test_campaign_learns_the_seats_of_a_bigger_craft():
+    """Four seats assumed for the first flight, six from then on."""
+    four = ["A Kerman", "B Kerman", "C Kerman", "D Kerman"]
+    six = ["E Kerman", "F Kerman", "G Kerman", "H Kerman", "I Kerman", "J Kerman"]
+    game = FakeGame([contract("four", four), contract("six", six)], capacity=7)
+    campaign = _campaign(game, target=1_000_000)[0]
+    assert campaign.seats == 4
+    result = campaign.run()
+    assert [len(crew) - 1 for _, crew in game.launches] == [4, 6]
+    assert campaign.seats == 6 and len(result.flights) == 2
+
+
+def test_campaign_flies_who_fits_in_a_smaller_craft():
+    """Two seats, four boarded: two fly, two wait for the next flight."""
+    four = ["A Kerman", "B Kerman", "C Kerman", "D Kerman"]
+    game = FakeGame([contract("four", four)], capacity=3)
+    result = _campaign(game, target=1_000_000)[0].run()
+    first, second = result.flights
+    assert (first.tourists, first.delivered, first.completed) == (2, 2, 0)
+    assert (second.tourists, second.delivered, second.completed) == (2, 2, 1)
+    assert game.launches[1][1][1:] == ["C Kerman", "D Kerman"]
+
+
+def test_campaign_reports_the_flight_that_stops_it():
+    """The summary is shown even when a check stops the campaign."""
+    game = FakeGame(_offers(), complete=False)
+    shown = []
+    with pytest.raises(CampaignError):
+        _campaign(game, target=1_000_000)[0].run(on_flight=shown.append)
+    assert len(shown) == 1 and shown[0].delivered == 0
+
+
 def test_campaign_stops_at_the_target():
     """Once the funds reach the target no more flights are made."""
     game = FakeGame(_offers(), funds=100_000)
@@ -732,6 +914,366 @@ def test_campaign_never_launches_while_a_vessel_is_flying():
         _campaign(game, target=1_000_000)[0].run()
     assert not game.launches
     assert all(c.status is ContractStatus.OFFERED for c in game.contracts.values())
+
+
+def _orbital_offers() -> list[TourismContract]:
+    """An orbital pair and a suborbital pair, like in the real game."""
+    return [contract("orb", ["Duddreda Kerman", "Dansy Kerman"], reward=64_998,
+                     destinations=(SUBORBITAL, ORBIT)),
+            contract("hop", ["Sigorio Kerman", "Macbuno Kerman"])]
+
+
+def test_campaign_flies_to_orbit_when_a_tourist_wants_it():
+    """Both pairs together, on an orbital flight; the orbit check reads flags."""
+    game = FakeGame(_orbital_offers())
+    flight = FakeFlight()
+    result = _campaign(game, target=1_000_000, flight=flight, max_flights=1)[0].run()
+    assert flight.missions == [Mission.ORBITAL]
+    assert result.flights[0].mission is Mission.ORBITAL
+    assert sorted(game.launches[0][1][1:]) == sorted(
+        ["Duddreda Kerman", "Dansy Kerman", "Sigorio Kerman", "Macbuno Kerman"])
+    # The check given to the flight follows the game's destination flags.
+    check = flight.checks[0]
+    game.contracts["orb"] = replace(game.contracts["orb"], status=ContractStatus.ACTIVE)
+    assert not check()
+    orb = game.contracts["orb"]
+    game.contracts["orb"] = replace(orb, tourists=tuple(replace(t, visited=(ORBIT,))
+                                                        for t in orb.tourists))
+    assert check()
+
+
+def test_campaign_orbit_test_boards_only_suborbital_tourists():
+    """No contract is at risk while the craft is being checked."""
+    game = FakeGame(_orbital_offers())
+    flight = FakeFlight()
+    _campaign(game, target=1_000_000, flight=flight, max_flights=1, orbit_test=True)[0].run()
+    assert flight.missions == [Mission.ORBITAL]
+    assert sorted(game.launches[0][1][1:]) == ["Macbuno Kerman", "Sigorio Kerman"]
+    assert game.contracts["orb"].status is ContractStatus.OFFERED
+
+
+def test_campaign_suborbital_only_leaves_orbital_contracts():
+    """--suborbital-only: hops only, orbital offers untouched."""
+    game = FakeGame(_orbital_offers())
+    flight = FakeFlight()
+    _campaign(game, target=1_000_000, flight=flight, max_mission=Mission.SUBORBITAL)[0].run()
+    assert flight.missions == [Mission.SUBORBITAL]
+    assert game.contracts["orb"].status is ContractStatus.OFFERED
+
+
+def test_campaign_stops_when_an_orbital_flight_misses_the_orbit():
+    """The craft needs work: do not fail more orbital contracts."""
+    game = FakeGame(_orbital_offers())
+    with pytest.raises(CampaignError, match="did not reach orbit"):
+        _campaign(game, target=1_000_000, flight=FakeFlight(reached_orbit=False),
+                  orbit_test=True)[0].run()
+
+
+# ------------------------------------------------------------ orbital flight (simulated)
+
+
+@dataclass
+class SimulatedOrbit(TourismGamePort):
+    """A rocket flying in a plane around a non-rotating Kerbin.
+
+    Point mass of unit mass (forces are accelerations), inverse-square
+    gravity, drag in the same exponential atmosphere as ``SimulatedHop`` and
+    a perfect autopilot. Stages like the real craft: 4 ignites everything,
+    3 drops the boosters, 2 the side engines, 1 the core, 0 opens the
+    parachutes. A maneuver node is flown by thrusting along (or against)
+    the velocity until its delta-v is delivered. The orbital elements come
+    from the state vector, independently of the code under test.
+    """
+
+    core_burn: float = 200.0
+    launched: bool = False
+    t: float = 0.0
+    x: float = 0.0
+    y: float = KERBIN_RADIUS
+    vx: float = 0.0
+    vy: float = 0.0
+    throttle: float = 0.0
+    current_stage: int = 5
+    chutes_open: bool = False
+    landed: bool = False
+    mode: str = "pitch"
+    pitch: float = 90.0
+    node: list | None = None  # [ut, prograde delta-v, delivered]
+    burns: list[float] = field(default_factory=list)  # prograde delta-v of each node
+    staged_at: list[tuple[int, float]] = field(default_factory=list)
+    max_periapsis: float = -KERBIN_RADIUS
+    engines: list[_Engine] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """Fit the engines; the core burn sets how much delta-v there is."""
+        self.engines = [
+            _Engine(4, 3, 30.0, 10.0, solid=True), _Engine(4, 3, 30.0, 10.0, solid=True),
+            _Engine(4, 2, 60.0, 6.0), _Engine(4, 2, 60.0, 6.0),
+            _Engine(4, 1, self.core_burn, 14.0),
+        ]
+        if self.launched:
+            self.current_stage = 2
+            for engine in self.engines[:4]:
+                engine.attached = False
+
+    # Physics -------------------------------------------------------------
+    def altitude(self) -> float:
+        """Altitude above the surface."""
+        return math.hypot(self.x, self.y) - KERBIN_RADIUS
+
+    def vertical_speed(self) -> float:
+        """Speed away from the centre."""
+        return (self.x * self.vx + self.y * self.vy) / math.hypot(self.x, self.y)
+
+    def _burning(self) -> list[_Engine]:
+        """Engines lit and with fuel."""
+        lit = self.current_stage <= 4
+        return [e for e in self.engines if e.attached and lit and e.burn_time > 0]
+
+    def advance(self, dt: float) -> None:
+        """Move the simulation forward (semi-implicit Euler)."""
+        if self.current_stage == 5:  # held on the pad
+            self.t += dt
+            return
+        left = dt
+        while left > 1e-9:
+            altitude = self.altitude()
+            fine = self.throttle > 0 or altitude < 72_000 or self._burning() and any(
+                e.solid for e in self._burning())
+            h = min(left, 0.05 if fine else 1.0)
+            left -= h
+            self.t += h
+            if self.landed:
+                continue
+            r = math.hypot(self.x, self.y)
+            up = (self.x / r, self.y / r)
+            east = (up[1], -up[0])
+            speed = math.hypot(self.vx, self.vy)
+            along = (self.vx / speed, self.vy / speed) if speed > 0 else up
+            if self.mode == "node" and self.node is not None:
+                direction = along if self.node[1] >= 0 else (-along[0], -along[1])
+            elif self.mode == "retro":
+                direction = (-along[0], -along[1])
+            else:
+                p = math.radians(self.pitch)
+                direction = (math.cos(p) * east[0] + math.sin(p) * up[0],
+                             math.cos(p) * east[1] + math.sin(p) * up[1])
+            thrust = 0.0
+            for engine in self._burning():
+                level = 1.0 if engine.solid else self.throttle
+                thrust += engine.thrust * level
+                engine.burn_time -= h * level
+            if self.node is not None and self.mode == "node":
+                self.node[2] += thrust * h
+            gravity = KERBIN_MU / r ** 2
+            drag = DRAG_K * speed ** 2 * _density(altitude)
+            self.vx += (thrust * direction[0] - gravity * up[0] - drag * along[0]) * h
+            self.vy += (thrust * direction[1] - gravity * up[1] - drag * along[1]) * h
+            if self.chutes_open and altitude < 5_000:
+                speed = math.hypot(self.vx, self.vy)
+                if speed > 7.0:  # under the canopies
+                    self.vx, self.vy = self.vx * 7.0 / speed, self.vy * 7.0 / speed
+            self.x += self.vx * h
+            self.y += self.vy * h
+            if math.hypot(self.x, self.y) <= KERBIN_RADIUS and self.t > 5:
+                self.landed = True
+                self.vx = self.vy = 0.0
+            self.max_periapsis = max(self.max_periapsis, self._elements()["periapsis"])
+
+    def _elements(self) -> dict[str, float]:
+        """Orbital elements of the current state vector."""
+        r = math.hypot(self.x, self.y)
+        speed2 = self.vx ** 2 + self.vy ** 2
+        energy = speed2 / 2 - KERBIN_MU / r
+        if energy >= 0 or speed2 == 0:
+            return dict(a=r / 2, e=1.0, apoapsis=self.altitude(), periapsis=-KERBIN_RADIUS,
+                        to_apo=0.0, to_peri=0.0, period=0.0)
+        a = -KERBIN_MU / (2 * energy)
+        h = self.x * self.vy - self.y * self.vx
+        e = math.sqrt(max(0.0, 1 + 2 * energy * h ** 2 / KERBIN_MU ** 2))
+        n = math.sqrt(KERBIN_MU / a ** 3)
+        if e < 1e-9:
+            mean = 0.0
+        else:
+            cos_nu = max(-1.0, min(1.0, (a * (1 - e ** 2) / r - 1) / e))
+            nu = math.acos(cos_nu)
+            if self.vertical_speed() < 0:
+                nu = 2 * math.pi - nu
+            ecc = 2 * math.atan2(math.sqrt(1 - e) * math.sin(nu / 2),
+                                 math.sqrt(1 + e) * math.cos(nu / 2))
+            mean = (ecc - e * math.sin(ecc)) % (2 * math.pi)
+        return dict(a=a, e=e, apoapsis=a * (1 + e) - KERBIN_RADIUS,
+                    periapsis=a * (1 - e) - KERBIN_RADIUS,
+                    to_apo=((math.pi - mean) % (2 * math.pi)) / n,
+                    to_peri=((2 * math.pi - mean) % (2 * math.pi)) / n,
+                    period=2 * math.pi / n)
+
+    # Port ------------------------------------------------------------------
+    def read_flight(self) -> FlightTelemetry:
+        altitude = self.altitude()
+        el = self._elements()
+        speed = math.hypot(self.vx, self.vy)
+        r = math.hypot(self.x, self.y)
+        situation = ("pre_launch" if self.current_stage == 5 else
+                     "splashed" if self.landed else
+                     "flying" if altitude < 70_000 else
+                     "orbiting" if el["periapsis"] > 70_000 else "sub_orbital")
+        return FlightTelemetry(
+            vessel="Orbiter", situation=situation, altitude=altitude,
+            vertical_speed=self.vertical_speed(), surface_speed=speed,
+            apoapsis=el["apoapsis"], time_to_apoapsis=el["to_apo"], ut=self.t,
+            current_stage=self.current_stage, parachute_stage=0, atmosphere_depth=70_000.0,
+            drag=DRAG_K * speed ** 2 * _density(altitude), weight=KERBIN_MU / r ** 2,
+            dynamic_pressure=0.5 * SEA_LEVEL_DENSITY * _density(altitude) * speed ** 2,
+            periapsis=el["periapsis"], semi_major_axis=el["a"], eccentricity=el["e"],
+            radius=r, time_to_periapsis=el["to_peri"], period=el["period"], mu=KERBIN_MU,
+            body_radius=KERBIN_RADIUS, thrust=sum(e.thrust for e in self._burning()), mass=1.0,
+        )
+
+    def read_engines(self) -> list[EngineState]:
+        lit = self.current_stage <= 4
+        return [EngineState(lit, e.burn_time > 0, e.decouple_stage)
+                for e in self.engines if e.attached]
+
+    def read_propulsion(self) -> Propulsion:
+        left = sum(e.thrust * max(e.burn_time, 0.0) for e in self.engines if e.attached)
+        thrust = sum(e.thrust for e in self.engines if e.attached and e.burn_time > 0)
+        return Propulsion(thrust=thrust, isp=300.0, mass=1.0, delta_v=left)
+
+    def parachutes_safe(self) -> bool:
+        return self.altitude() < 20_000 and math.hypot(self.vx, self.vy) < 300
+
+    def parachutes_open(self) -> bool:
+        return self.chutes_open and self.altitude() < 5_000
+
+    def has_control(self) -> bool:
+        return True
+
+    def stage(self) -> None:
+        self.current_stage -= 1
+        self.staged_at.append((self.current_stage, self.altitude()))
+        for engine in self.engines:
+            if engine.decouple_stage == self.current_stage:
+                engine.attached = False
+        if self.current_stage == 0:
+            self.chutes_open = True
+
+    def set_throttle(self, value: float) -> None:
+        self.throttle = value
+
+    def point(self, pitch: float, heading: float) -> None:
+        self.mode, self.pitch = "pitch", pitch
+
+    def hold_retrograde(self) -> None:
+        self.mode = "retro"
+
+    def release_controls(self) -> None:
+        self.throttle = 0.0
+
+    def warp_to(self, ut: float) -> None:
+        self.advance(ut - self.t)
+
+    def set_physics_warp(self, factor: int) -> None:
+        pass
+
+    def add_node(self, ut: float, prograde: float) -> None:
+        self.node = [ut, prograde, 0.0]
+        self.burns.append(prograde)
+
+    def node_remaining_dv(self) -> float | None:
+        return None if self.node is None else abs(abs(self.node[1]) - self.node[2])
+
+    def aim_at_node(self) -> None:
+        self.mode = "node"
+
+    def remove_nodes(self) -> None:
+        self.node = None
+
+    def pointing_error(self) -> float:
+        return 0.0
+
+    # Unused by the director.
+    def read_crew(self): raise NotImplementedError
+    def funds(self) -> float: raise NotImplementedError
+    def read_tourism_contracts(self): raise NotImplementedError
+    def accept_contract(self, contract_id): raise NotImplementedError
+    def contract_status(self, contract_id): raise NotImplementedError
+    def roster(self): raise NotImplementedError
+    def launch(self, craft, crew): raise NotImplementedError
+    def close(self) -> None: pass
+
+
+def test_orbital_flight_circularizes_waits_deorbits_and_lands():
+    """The whole orbital profile, in order."""
+    sim = SimulatedOrbit()
+    checks = []
+
+    def orbit_counted() -> bool:
+        checks.append(sim.read_flight().situation)
+        return len(checks) >= 3  # the game takes a moment
+
+    report = _director(sim).fly(Mission.ORBITAL, orbit_counted)
+    assert report.reached_space and report.reached_orbit
+    assert report.situation == "splashed"
+    assert sim.max_periapsis > 70_000
+    # Circularization (prograde) then deorbit (retrograde, small).
+    assert len(sim.burns) == 2 and 100 < sim.burns[0] < 1_500 and -60 < sim.burns[1] < 0
+    # The orbit is waited for while orbiting.
+    assert checks and set(checks) == {"orbiting"}
+    # The core is only dropped after the deorbit burn, in space.
+    altitude = dict(sim.staged_at)
+    assert [stage for stage, _ in sim.staged_at] == [4, 3, 2, 1, 0]
+    assert altitude[1] > 70_000 and altitude[0] < 20_000
+    assert report.delta_v_orbit is not None and report.delta_v_orbit > 39.0
+
+
+def test_orbital_flight_short_of_delta_v_on_the_pad_flies_a_hop():
+    """Too little delta-v for an orbit: straight up, so space is reached."""
+    sim = SimulatedOrbit(core_burn=60.0)  # 2,160 m/s, like the real v1.2
+    report = _director(sim).fly(Mission.ORBITAL, lambda: True)
+    assert report.reached_space and not report.reached_orbit
+    assert report.orbit_delta_v_needed == 3_600 and report.delta_v_launch == pytest.approx(2_160)
+    assert report.situation == "splashed" and sim.burns == []
+
+
+def test_orbital_flight_without_enough_delta_v_stays_suborbital():
+    """Never circularize without the fuel to come back."""
+    sim = SimulatedOrbit(core_burn=110.0)
+    # The pad check is off, to reach the check made before circularizing.
+    report = _director(sim, orbit_delta_v=0).fly(Mission.ORBITAL, lambda: True)
+    assert report.reached_space and not report.reached_orbit
+    assert report.situation == "splashed"
+    assert sim.burns == [] and sim.max_periapsis < 70_000
+
+
+def test_orbital_flight_stays_in_orbit_when_the_game_does_not_count_it():
+    """The tourists' orbit must be counted before coming back."""
+    sim = SimulatedOrbit()
+    with pytest.raises(FlightError, match="left in orbit"):
+        _director(sim).fly(Mission.ORBITAL, lambda: False)
+    assert sim.read_flight().situation == "orbiting"
+
+
+def test_apoapsis_pitch_is_flat_at_the_target_apoapsis():
+    """Vertical at the start, horizontal at the target, sooner below 1."""
+    from ksp_control.domain.tourism import apoapsis_pitch
+
+    assert apoapsis_pitch(2_000, 2_000, 80_000) == 90
+    assert apoapsis_pitch(41_000, 2_000, 80_000) == pytest.approx(45)
+    assert apoapsis_pitch(80_000, 2_000, 80_000) == 0
+    assert apoapsis_pitch(95_000, 2_000, 80_000) == 0
+    # A quarter of the way up with shape 0.5: already halfway over.
+    assert apoapsis_pitch(21_500, 2_000, 80_000, shape=0.5) == pytest.approx(45)
+
+
+def test_engines_relight_only_when_the_apoapsis_drops_clearly():
+    """A few metres lost to the air do not flicker the engines."""
+    from ksp_control.domain.tourism import ascent_throttle
+
+    assert ascent_throttle(79_990, 80_000) == 1.0            # still climbing
+    assert ascent_throttle(80_010, 80_000) == 0.0            # reached: cut
+    assert ascent_throttle(79_990, 80_000, cut=True) == 0.0  # air took 10 m
+    assert ascent_throttle(79_400, 80_000, cut=True) == 1.0  # clearly lower
 
 
 def test_ascent_pitch_turns_gradually():

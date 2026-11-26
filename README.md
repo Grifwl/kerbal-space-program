@@ -194,25 +194,26 @@ code and localization and were checked on a Spanish game; English titles
 are recognized too. The speed is the surface speed, as KSP uses it for
 these windows in the atmosphere.
 
-## Suborbital tourism
+## Tourism (suborbital and orbital)
 
-`ksp-tourism` earns funds with the "take tourists on a suborbital flight
-of Kerbin" contracts, in a loop, until the funds reach a target or no such
-contract is left:
+`ksp-tourism` earns funds with the tourism contracts of Kerbin (a
+suborbital flight, an orbit, or both), in a loop, until the funds reach a
+target or no such contract is left:
 
 ```powershell
-.venv\Scripts\ksp-tourism --craft "Passatgers v1.1" --target 500000 --dry-run
-.venv\Scripts\ksp-tourism --craft "Passatgers v1.1" --target 500000 --max-flights 1
-.venv\Scripts\ksp-tourism --craft "Passatgers v1.1" --target 500000
+.venv\Scripts\ksp-tourism --craft "Passatgers v1.2" --target 500000 --dry-run
+.venv\Scripts\ksp-tourism --craft "Passatgers v1.2" --target 500000 --orbit-test --max-flights 1
+.venv\Scripts\ksp-tourism --craft "Passatgers v1.2" --target 500000
 ```
 
 Each flight:
 
 1. **Chooses the tourists.** Only tourism contracts whose every tourist
-   wants nothing but a suborbital flight of Kerbin. Tourists of contracts
+   wants nothing but a suborbital flight or an orbit of Kerbin (a flyby of
+   the Mun, say, rules the contract out). Tourists of contracts
    already accepted board first (contracts with fewer tourists left
-   first, so they are completed sooner); the free seats (`--seats`,
-   default 4, pilot not included) are filled with the offers that seat
+   first, so they are completed sooner); the free seats are filled with
+   the offers that seat
    the most tourists and earn the most on this flight. Several contracts
    fly together. If KSP refuses an offer (the Mission Control limit of
    active contracts), the flight goes with what was accepted.
@@ -225,6 +226,20 @@ Each flight:
    fills more seats or pays more per seat (five tourists at 19,500 each
    beat two pairs at 13,000); between equally paying choices, the one that
    fits exactly wins. `--dry-run` shows who flies now and how many wait.
+
+   **Seats**: on the launch pad the campaign reads how many kerbals the
+   craft holds and plans the next flights with that number, minus the
+   pilot's seat; a bigger craft fills its new cabins from the second
+   flight on. The first flight assumes 4 passenger seats, or `--seats`.
+   Tourists that do not fit (a smaller craft than assumed) stay at the
+   space center and fly next.
+
+   **Suborbital and orbital tourists fly together**: an orbital flight
+   leaves the atmosphere on its way up, which completes the suborbital
+   destinations too. The flight is orbital as soon as one tourist on
+   board wants an orbit, and suborbital otherwise; the choice of tourists
+   is never bent to keep a flight suborbital. `--suborbital-only` leaves
+   the orbital tourists alone, for a craft that cannot reach orbit.
 2. **Launches the craft** from the launch pad with a pilot and the
    tourists. Pilots take turns (every hired pilot, or the `--pilot` ones in
    that order). The pilot is boarded first, so they sit in the first seat
@@ -238,7 +253,8 @@ Each flight:
    is activated when every engine it drops has burnt out (boosters, side
    engines) or when nothing is pushing; the parachute stage is never
    activated on the way up. The engines are cut once the apoapsis passes
-   `--apoapsis` (default 75 km) and relit if drag pulls it down.
+   `--apoapsis` (default 75 km) and relit if drag pulls it more than
+   500 m below.
    **Air limit**: while the dynamic pressure (thick air and high speed
    together, what makes the air "boil" around the rocket) is above
    `--max-q` (default 20 kPa, like MechJeb's "Limit Q"), the throttle is
@@ -247,10 +263,56 @@ Each flight:
    (`--max-drag`, default 1, i.e. no faster than terminal velocity), but a
    heavy rocket's terminal velocity is about 500 m/s, so that one rarely
    acts. Solid boosters cannot be throttled, so while they burn the limit
-   may be passed. `--max-q 0 --max-drag 0` disables both.
+   may be passed. `--max-q 0 --max-drag 0` disables both. **Heat
+   limit**: higher up the air is too thin for the dynamic pressure limit
+   (20 kPa at 25 km is about 1,900 m/s), but a rocket flying fast there
+   still heats up; while the hottest part is above `--max-heat` (default
+   80%) of the temperature it withstands, the throttle is lowered the
+   same way (`--max-heat 0` disables it).
 4. **Above 70 km** the vessel is suborbital and the tourists' destination
    is done. The stages above the parachutes are jettisoned, the capsule
    turns its heat shield forward and time warp skips to the reentry.
+
+   **An orbital flight** goes on instead (steps 3 and 4 change):
+   - *Launch pad check*: the orbit is only attempted when KSP's vacuum
+     delta-v reaches `--orbit-delta-v` (default 3,600 m/s: about 3,400 to
+     reach a low orbit, plus the deorbit and a reserve). With less, an
+     orbital ascent would spend its fuel sideways and might not even reach
+     space; the vessel flies a suborbital hop instead, so the tourists
+     reach space, and the campaign stops.
+   - *Ascent*: vertical for the first kilometre, then a gravity turn to
+     the east driven by the apoapsis: the pitch drops from 90 degrees in
+     proportion to how far the apoapsis has risen, from where it was at
+     the end of the vertical climb, and the rocket is horizontal when the
+     apoapsis reaches `--orbit` (default 80 km), so the turn adapts to the
+     rocket's thrust. `--turn-shape` below 1 (the default) tilts sooner:
+     circularizing then costs less, but the rocket spends longer flying
+     fast in thick, hot air. Same air and heat limits and staging as the
+     hop. The engines are cut at the target apoapsis and relit if the air
+     pulls it more than 500 m below before leaving the atmosphere.
+   - *Circularization*: a maneuver node at the apoapsis raises the
+     periapsis to the same altitude; the burn is centred on the node and
+     eases off at the end. Before it, KSP's own vacuum delta-v must cover
+     the circularization, the deorbit burn and 100 m/s of reserve:
+     otherwise the vessel is not put into orbit (it could be stranded
+     there), comes down as a suborbital flight and the campaign stops.
+   - *Orbit*: the vessel stays in orbit until the game marks the tourists'
+     orbit destinations as reached (after 2 minutes without it, the
+     campaign stops and leaves the vessel in orbit for you).
+   - *Deorbit*: a retrograde node at the apoapsis lowers the periapsis to
+     `--deorbit-periapsis` (default 35 km); the stages above the
+     parachutes are only jettisoned after it, and the landing is as in a
+     suborbital flight. The capsule may come down far from the space
+     center, which lowers the vessel's recovery value, not the tourists'
+     rewards.
+
+   The log tells how much the circularization costs and the delta-v left;
+   if circularizing costs too much, try a lower `--turn-shape`.
+
+   **Check a craft first** with `--orbit-test`: every flight goes to
+   orbit, but only suborbital tourists board. Tourists recovered without
+   reaching their destination do not fail their contract (seen in game):
+   they stay at the space center for another flight.
 5. **Lands**: the parachute stage is activated when KSP rates a parachute
    safe to open (or below 2 km anyway); the game then opens them when it
    is safe. The autopilot keeps the heat shield forward until a canopy
@@ -263,7 +325,8 @@ Each flight:
 
 The campaign stops, and asks you to look, when something does not go to
 plan: a tourist whose itinerary is not completed after the recovery, a
-flight that did not reach space, no pilot available, or a vessel lost.
+flight that did not reach space (or orbit, when it had to), no pilot
+available, or a vessel lost.
 Ctrl+C stops it at any time; a vessel in flight is then yours.
 
 You may go on EVA or look at another vessel during a flight: while the
@@ -288,14 +351,15 @@ src/ksp_control/
 │   ├── ledger.py        Snapshot diff -> events; ledger summary
 │   ├── recovery.py      Recovery value estimate and recovery decisions
 │   ├── part_tests.py    Part test requirements, flight plan, speed governor
-│   └── tourism.py       Tourism contract choice, pilot turns, ascent rules
+│   └── tourism.py       Tourism contract choice and missions, pilot turns,
+│                        ascent rules, orbital mechanics
 ├── application/         Use cases + ports
 │   ├── ports.py         GameTelemetryPort, EconomyRepositoryPort, FleetPort,
 │   │                    PartTestGamePort, TourismGamePort
 │   ├── economy_monitor.py
 │   ├── vessel_recovery.py
 │   ├── part_test_assistant.py
-│   ├── suborbital_flight.py   Flies a suborbital hop and lands it
+│   ├── tourism_flight.py      Flies a suborbital hop or an orbit, and lands
 │   └── tourism_campaign.py    Contracts -> launch -> flight -> recovery loop
 ├── adapters/
 │   ├── game/            kRPC telemetry, fleet, part tests and tourism; contract text

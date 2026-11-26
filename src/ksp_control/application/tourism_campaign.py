@@ -1,13 +1,16 @@
-"""Use case: earn funds flying tourists on suborbital hops, over and over.
+"""Use case: earn funds flying tourists to space and back, over and over.
 
 Each round of the campaign:
 
 1. stops when the funds reach the target;
-2. picks the tourists of the next hop (tourists of accepted contracts
+2. picks the tourists of the next flight (tourists of accepted contracts
    first, then offers to fill the seats) and accepts the offers; a
    contract with more tourists than seats is split over several flights;
+   suborbital and orbital tourists fly together, and the flight is orbital
+   as soon as one of them wants an orbit;
 3. launches the craft with a pilot (taking turns) and the tourists;
-4. flies the hop (``SuborbitalFlightDirector``);
+4. flies the mission (``TourismFlightDirector``), staying in orbit until
+   the game counts it for the tourists;
 5. recovers the vessel and whatever pieces of it landed, which brings the
    tourists home, completes their itineraries and, once a contract has no
    tourist left waiting, the contract;
@@ -26,20 +29,27 @@ from enum import Enum
 from typing import TypeVar
 
 from ksp_control.application.ports import GameUnavailableError, TourismGamePort
-from ksp_control.application.suborbital_flight import FlightReport
+from ksp_control.application.tourism_flight import FlightReport
 from ksp_control.application.vessel_recovery import VesselRecoveryService
 from ksp_control.domain.ledger import owner_vessel
 from ksp_control.domain.recovery import RecoveryPolicy
 from ksp_control.domain.tourism import (
+    Boarding,
     ContractStatus,
+    Mission,
     PassengerPlan,
     choose_pilot,
+    orbit_visited,
     plan_passengers,
+    tourist_mission,
 )
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+# Passenger seats assumed until the craft is seen on the launch pad.
+DEFAULT_SEATS = 4
 
 
 class CampaignError(RuntimeError):
@@ -50,7 +60,7 @@ class StopReason(Enum):
     """Why the campaign ended normally."""
 
     TARGET_REACHED = "target reached"
-    NO_CONTRACTS = "no suborbital tourism contracts left"
+    NO_CONTRACTS = "no tourism contracts left that the campaign can fly"
     FLIGHT_LIMIT = "flight limit reached"
 
 
@@ -61,18 +71,38 @@ class CampaignOptions:
     Attributes:
         craft: Name of the VAB craft to launch.
         target_funds: Stop once the funds reach this amount.
-        seats: Passenger seats of the craft (the pilot's seat excluded).
+        seats: Passenger seats of the craft (the pilot's seat excluded)
+            for the first flight; ``None`` assumes ``DEFAULT_SEATS``. Each
+            launch reads the real number from the craft, which the next
+            flights use.
         pilots: Pilots to take turns, in order; every hired pilot if empty.
         max_flights: Stop after this many flights (``None``: no limit).
         body: Body launched from.
+        max_mission: Most demanding mission the craft may fly; tourists
+            needing more are left alone.
+        orbit_test: Fly every flight to orbit, but board only tourists
+            that want a suborbital flight: a way to check that the craft
+            reaches orbit and comes back without risking any contract
+            (falling short still completes their suborbital flight).
     """
 
     craft: str
     target_funds: float
-    seats: int = 4
+    seats: int | None = None
     pilots: tuple[str, ...] = ()
     max_flights: int | None = None
     body: str = "Kerbin"
+    max_mission: Mission = Mission.ORBITAL
+    orbit_test: bool = False
+
+    @property
+    def boarding_mission(self) -> Mission:
+        """Most demanding mission a tourist may need to board.
+
+        Returns:
+            Suborbital in an orbit test, ``max_mission`` otherwise.
+        """
+        return Mission.SUBORBITAL if self.orbit_test else self.max_mission
 
 
 @dataclass(frozen=True)
@@ -94,6 +124,7 @@ class FlightSummary:
         delivered: Tourists whose itinerary was completed after the
             recovery.
         waiting: Tourists of the flown contracts left for later flights.
+        mission: Suborbital hop or orbital flight.
     """
 
     number: int
@@ -108,6 +139,7 @@ class FlightSummary:
     tourists: int = 0
     delivered: int = 0
     waiting: int = 0
+    mission: Mission = Mission.SUBORBITAL
 
     @property
     def net(self) -> float:
@@ -152,28 +184,34 @@ class CampaignResult:
 
 
 class TourismCampaign:
-    """Runs suborbital tourist flights until a funds target is reached.
+    """Runs tourist flights to space until a funds target is reached.
 
     Responsibilities: choose and accept contracts, crew and launch the
     craft, delegate the flight, recover the vessel and its debris, and
     check that every tourist on board had their itinerary completed.
     Anything unexpected (a tourist not delivered, a flight that did not
-    reach space) stops the campaign with ``CampaignError`` instead of
-    repeating the mistake.
+    reach space, or orbit when it had to) stops the campaign with
+    ``CampaignError`` instead of repeating the mistake.
 
     Contracts with more tourists than seats are accepted and flown over
     several flights: the tourists left behind board first on the next
     ones, since they belong to an accepted contract.
 
-    Usage notes: the flight is injected as a callable (normally
-    ``SuborbitalFlightDirector.fly``) and the recovery as a
+    The passenger seats come from the options for the first flight; every
+    launch then reads the crew capacity of the craft on the pad and the
+    next flights plan with it. Tourists that did not fit stay at the space
+    center and fly next.
+
+    Usage notes: the flight is injected as a callable taking the mission
+    and the orbit check (normally ``TourismFlightDirector.fly``) and the
+    recovery as a
     ``VesselRecoveryService``, so tests can replace both.
     """
 
     def __init__(
         self,
         game: TourismGamePort,
-        fly: Callable[[], FlightReport],
+        fly: Callable[[Mission, Callable[[], bool] | None], FlightReport],
         recovery: VesselRecoveryService,
         options: CampaignOptions,
         sleep: Callable[[float], None] = time.sleep,
@@ -182,7 +220,9 @@ class TourismCampaign:
 
         Args:
             game: Port to the game.
-            fly: Flies the launched vessel back to the ground.
+            fly: Flies the launched vessel on a mission and back to the
+                ground; the second argument tells whether the game counts
+                the orbit for every tourist on board.
             recovery: Recovers the vessel and its debris.
             options: What the player wants.
             sleep: Function used to wait for the game to settle.
@@ -192,6 +232,18 @@ class TourismCampaign:
         self._recovery = recovery
         self._options = options
         self._sleep = sleep
+        self._seats = options.seats if options.seats is not None else DEFAULT_SEATS
+        self._on_flight: Callable[[FlightSummary], None] | None = None
+
+    @property
+    def seats(self) -> int:
+        """Passenger seats the next flight is planned with.
+
+        Returns:
+            The seats given in the options until a launch shows the craft's
+            real number.
+        """
+        return self._seats
 
     def next_plan(self, allow_offers: bool = True) -> PassengerPlan:
         """Choose the contracts of the next flight, without acting.
@@ -204,14 +256,16 @@ class TourismCampaign:
         """
         contracts = self._game.read_tourism_contracts()
         available = {k.name for k in self._game.roster() if k.available}
-        return plan_passengers(contracts, self._options.seats, available,
-                               self._options.body, allow_offers=allow_offers)
+        return plan_passengers(contracts, self._seats, available,
+                               self._options.body, allow_offers=allow_offers,
+                               max_mission=self._options.boarding_mission)
 
     def run(self, on_flight: Callable[[FlightSummary], None] | None = None) -> CampaignResult:
         """Fly until the target is reached or no contract is left.
 
         Args:
-            on_flight: Called after each flight, for progress output.
+            on_flight: Called after each flight, for progress output, also
+                for a flight that stops the campaign.
 
         Returns:
             Why the campaign stopped and what it did.
@@ -222,6 +276,7 @@ class TourismCampaign:
             GameUnavailableError: When the game stops answering.
         """
         options = self._options
+        self._on_flight = on_flight
         start_funds = self._retry(self._game.funds)
         flights: list[FlightSummary] = []
         while True:
@@ -236,10 +291,7 @@ class TourismCampaign:
             if plan.is_empty:
                 return CampaignResult(StopReason.NO_CONTRACTS, tuple(flights), start_funds, funds)
 
-            summary = self._flight(len(flights) + 1, plan)
-            flights.append(summary)
-            if on_flight:
-                on_flight(summary)
+            flights.append(self._flight(len(flights) + 1, plan))
 
     # ------------------------------------------------------------- one round
 
@@ -321,7 +373,9 @@ class TourismCampaign:
             raise CampaignError("no pilot is available at the space center")
         # plan_passengers only boards tourists matched to the roster.
         tourists = [t.kerbal for t in plan.tourists if t.kerbal]
-        logger.info("Flight %d: pilot %s, tourists %s", number, pilot, ", ".join(tourists))
+        mission = Mission.ORBITAL if options.orbit_test else plan.mission
+        logger.info("Flight %d (%s%s): pilot %s, tourists %s", number, mission.label,
+                    ", orbit test" if options.orbit_test else "", pilot, ", ".join(tourists))
         for boarding in plan.boardings:
             if boarding.left_behind:
                 logger.info("  Waiting for a later flight: %s",
@@ -330,7 +384,10 @@ class TourismCampaign:
         funds_before = self._retry(self._game.funds)
         vessel = self._game.launch(options.craft, [pilot, *tourists])
         launch_cost = funds_before - self._retry(self._game.funds)
-        report = self._fly()
+        plan = self._check_crew(plan)
+        if not options.orbit_test:
+            mission = plan.mission
+        report = self._fly(mission, lambda: self._orbit_counted(plan))
         self._recover(vessel)
 
         statuses, delivered = self._wait_for_delivery(plan)
@@ -359,11 +416,29 @@ class TourismCampaign:
             tourists=plan.seats_used,
             delivered=len(delivered),
             waiting=sum(b.waiting for b in plan.boardings),
+            mission=mission,
         )
+        # Reported before any check below stops the campaign, so the
+        # flight's outcome is always shown.
+        if self._on_flight:
+            self._on_flight(summary)
         if not report.reached_space:
             raise CampaignError(
                 f"flight {number} only reached {report.max_altitude:,.0f} m: the craft "
                 "cannot get the tourists to space as it is"
+            )
+        if mission is Mission.ORBITAL and not report.reached_orbit:
+            if report.orbit_delta_v_needed is not None and report.delta_v_launch is not None:
+                left = (f" (it had {report.delta_v_launch:,.0f} m/s of delta-v on the pad; an "
+                        f"orbit needs about {report.orbit_delta_v_needed:,.0f}), so it flew a "
+                        "suborbital hop")
+            elif report.delta_v_orbit is not None:
+                left = f" ({report.delta_v_orbit:,.0f} m/s of delta-v left above the atmosphere)"
+            else:
+                left = ""
+            raise CampaignError(
+                f"flight {number} did not reach orbit{left}: the craft needs more fuel or "
+                "thrust; until then run the campaign with --suborbital-only"
             )
         if len(delivered) < plan.seats_used:
             raise CampaignError(
@@ -371,6 +446,71 @@ class TourismCampaign:
                 f"itinerary after flight {number}; check the contracts in Mission Control"
             )
         return summary
+
+    def _check_crew(self, plan: PassengerPlan) -> PassengerPlan:
+        """Learn the craft's seats on the pad and see who really boarded.
+
+        The craft is only known once it is on the pad: its crew capacity,
+        minus the pilot's seat, is what the next flights plan with. If it
+        holds fewer than were boarded, the tourists left out simply stay
+        at the space center: the flight goes on with those on board, and
+        the others fly next (their contract is already accepted).
+
+        Args:
+            plan: The tourists meant to fly.
+
+        Returns:
+            The plan reduced to the tourists actually on board.
+        """
+        capacity, aboard = self._retry(self._game.read_crew)
+        seats = max(0, capacity - 1)
+        if seats != self._seats:
+            logger.info("%s has %d passenger seat(s) (%d in all, pilot included): the next "
+                        "flights plan with %d", self._options.craft, seats, capacity, seats)
+            self._seats = seats
+        on_board = set(aboard)
+        missing = [t for t in plan.tourists if t.kerbal not in on_board]
+        if not missing:
+            return plan
+        logger.warning("No seat for %s: they wait for the next flight",
+                       ", ".join(t.kerbal or t.itinerary for t in missing))
+
+        def keep(boardings: tuple[Boarding, ...]) -> tuple[Boarding, ...]:
+            """Boardings reduced to the tourists on board (empty ones dropped)."""
+            kept = (Boarding(b.contract, tuple(t for t in b.tourists if t.kerbal in on_board))
+                    for b in boardings)
+            return tuple(b for b in kept if b.tourists)
+
+        carry, accept = keep(plan.carry), keep(plan.accept)
+        missions = [tourist_mission(t, self._options.body) for b in (*carry, *accept)
+                    for t in b.tourists]
+        mission = max((m for m in missions if m is not None), default=Mission.SUBORBITAL)
+        return PassengerPlan(carry=carry, accept=accept, mission=mission)
+
+    def _orbit_counted(self, plan: PassengerPlan) -> bool:
+        """Tell whether the game counts the orbit for every tourist on board.
+
+        Read during the flight, while the vessel is in orbit: the game
+        marks each destination of an itinerary as soon as it is reached.
+
+        Args:
+            plan: The flight's tourists.
+
+        Returns:
+            True when every orbit destination of every tourist on board is
+            marked as reached (also when nobody wants an orbit).
+        """
+        current = {c.contract_id: c for c in self._retry(self._game.read_tourism_contracts)}
+        for boarding in plan.boardings:
+            contract = current.get(boarding.contract.contract_id)
+            if contract is None:
+                continue  # no longer active: nothing left to wait for
+            by_itinerary = {t.itinerary: t for t in contract.tourists}
+            for tourist in boarding.tourists:
+                now = by_itinerary.get(tourist.itinerary, tourist)
+                if not orbit_visited(now, self._options.body):
+                    return False
+        return True
 
     def _recover(self, vessel: str) -> float:
         """Recover the landed vessel and the pieces that came off it.
