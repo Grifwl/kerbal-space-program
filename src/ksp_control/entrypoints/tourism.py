@@ -1,4 +1,4 @@
-"""Fly tourists to space (suborbital or orbit) until the funds reach a target.
+"""Fly tourists to space (suborbital or orbit) until a funds or science target.
 
 Each flight accepts the tourism contracts of Kerbin (suborbital flights and
 orbits) that fill the craft, launches it with a pilot (taking turns) and
@@ -11,22 +11,28 @@ it at once, leaving the vessel in flight to you.
 Examples:
     See what the next flight would carry, without touching the game::
 
-        ksp-tourism --craft "Passatgers v1.2" --target 500000 --dry-run
+        ksp-tourism --craft "Passatgers v1.2" --funds-target 500000 --dry-run
 
     Check that the craft reaches orbit and comes back, with suborbital
     tourists only (no contract at risk if it falls short)::
 
-        ksp-tourism --craft "Passatgers v1.2" --target 500000 --orbit-test --max-flights 1
+        ksp-tourism --craft "Passatgers v1.2" --funds-target 500000 --orbit-test --max-flights 1
 
     Fly until 500,000 funds or no contracts are left::
 
-        ksp-tourism --craft "Passatgers v1.2" --target 500000
+        ksp-tourism --craft "Passatgers v1.2" --funds-target 500000
+
+    Fly until 160 science points (to research a technology), or 500,000
+    funds, whichever comes first::
+
+        ksp-tourism --craft "Passatgers v1.2" --science-target 160 --funds-target 500000
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import math
 import sys
 
 from ksp_control.adapters.game.krpc_connection import KrpcEndpoint
@@ -71,8 +77,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--craft", required=True,
                         help="Name of the VAB craft to launch, e.g. \"Passatgers v1.1\".")
-    parser.add_argument("--target", type=float, required=True,
+    parser.add_argument("--funds-target", type=float, default=None,
                         help="Stop when the funds reach this amount.")
+    parser.add_argument("--science-target", type=float, default=None,
+                        help="Stop when the science points reach this amount, e.g. the cost "
+                             "of a technology to research.")
     parser.add_argument("--seats", type=int, default=None,
                         help="Passenger seats of the craft, pilot excluded, for the first "
                              "flight; every launch reads the real number from the craft for "
@@ -159,6 +168,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Port of the kRPC TCP/IP server.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging.")
     args = parser.parse_args(argv)
+    if args.funds_target is None and args.science_target is None and args.max_flights is None:
+        parser.error("give a limit: --funds-target, --science-target and/or --max-flights")
     if args.apoapsis <= 70_000:
         parser.error("--apoapsis must be above 70,000 m, where space begins at Kerbin")
     if args.orbit <= 70_000:
@@ -249,7 +260,8 @@ def main(argv: list[str] | None = None) -> int:
     director = TourismFlightDirector(game, profile)
     options = CampaignOptions(
         craft=args.craft,
-        target_funds=args.target,
+        target_funds=args.funds_target if args.funds_target is not None else math.inf,
+        target_science=args.science_target,
         seats=args.seats,
         pilots=tuple(args.pilot),
         max_flights=args.max_flights,
@@ -278,10 +290,12 @@ def main(argv: list[str] | None = None) -> int:
             logger.warning("Game alarm \"%s\" %s: not launching another flight",
                            result.alarm.title, _when(result.alarm.seconds_away))
         # %-style logging has no thousands separator: format it here.
-        logger.info("Stopped: %s. %d flight(s), funds %s -> %s (%s)",
+        logger.info("Stopped: %s. %d flight(s), funds %s -> %s (%s), science %s -> %s (%s)",
                     result.reason.value, len(result.flights),
                     f"{result.start_funds:,.0f}", f"{result.end_funds:,.0f}",
-                    f"{result.end_funds - result.start_funds:+,.0f}")
+                    f"{result.end_funds - result.start_funds:+,.0f}",
+                    f"{result.start_science:,.1f}", f"{result.end_science:,.1f}",
+                    f"{result.end_science - result.start_science:+,.1f}")
         return 0
     except (CampaignError, FlightError) as error:
         logger.error("Stopped: %s", error)
@@ -342,7 +356,13 @@ def _dry_run(game: KrpcTourismGame, campaign: TourismCampaign, options: Campaign
         Process exit code.
     """
     funds = game.funds()
-    print(f"Funds: {funds:,.0f} (target {options.target_funds:,.0f})")
+    target = (f"target {options.target_funds:,.0f}" if math.isfinite(options.target_funds)
+              else "no target")
+    print(f"Funds: {funds:,.0f} ({target})")
+    science = game.science()
+    target = (f"target {options.target_science:,.1f}" if options.target_science is not None
+              else "no target")
+    print(f"Science: {science:,.1f} ({target})")
     contracts = game.read_tourism_contracts()
     print(f"Tourism contracts: {len(contracts)}")
     for contract in contracts:

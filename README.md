@@ -206,14 +206,27 @@ these windows in the atmosphere.
 ## Tourism (suborbital and orbital)
 
 `ksp-tourism` earns funds with the tourism contracts of Kerbin (a
-suborbital flight, an orbit, or both), in a loop, until the funds reach a
-target or no such contract is left:
+suborbital flight, an orbit, or both), in a loop, until a limit is
+reached or no such contract is left:
 
 ```powershell
-.venv\Scripts\ksp-tourism --craft "Passatgers v1.2" --target 500000 --dry-run
-.venv\Scripts\ksp-tourism --craft "Passatgers v1.2" --target 500000 --orbit-test --max-flights 1
-.venv\Scripts\ksp-tourism --craft "Passatgers v1.2" --target 500000
+.venv\Scripts\ksp-tourism --craft "Passatgers v1.2" --funds-target 500000 --dry-run
+.venv\Scripts\ksp-tourism --craft "Passatgers v1.2" --orbit-test --max-flights 1
+.venv\Scripts\ksp-tourism --craft "Passatgers v1.2" --funds-target 500000
+.venv\Scripts\ksp-tourism --craft "Passatgers v1.2" --science-target 160
 ```
+
+The limits, checked before each flight (at least one is needed; the
+first one reached stops the campaign):
+
+- `--funds-target`: the funds reach this amount.
+- `--science-target`: the science points reach this amount, e.g. the cost
+  of the next technology: stop, research it, and run the campaign again.
+  Tourism contracts pay no science themselves; it comes indirectly from
+  whatever turns their reputation into science (an Administration
+  strategy, for instance). In one career that made 13-17 points per
+  orbital flight.
+- `--max-flights`: this many flights have been flown.
 
 Each flight:
 

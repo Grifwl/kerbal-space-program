@@ -166,6 +166,14 @@ class KrpcTourismGame(TourismGamePort):
         """
         return self._call(lambda conn: float(conn.space_center.funds))
 
+    def science(self) -> float:
+        """Return the current science points.
+
+        Returns:
+            Science.
+        """
+        return self._call(lambda conn: float(conn.space_center.science))
+
     def read_tourism_contracts(self) -> list[TourismContract]:
         """Read the tourism contracts on offer and accepted.
 

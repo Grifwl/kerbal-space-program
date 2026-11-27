@@ -372,6 +372,17 @@ class TourismGamePort(ABC):
         """
 
     @abstractmethod
+    def science(self) -> float:
+        """Return the current science points.
+
+        Returns:
+            Science.
+
+        Raises:
+            GameUnavailableError: When the game cannot be read.
+        """
+
+    @abstractmethod
     def read_tourism_contracts(self) -> list[TourismContract]:
         """Read the tourism contracts on offer and accepted.
 

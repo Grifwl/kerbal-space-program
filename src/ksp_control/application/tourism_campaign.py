@@ -69,7 +69,8 @@ class CampaignError(RuntimeError):
 class StopReason(Enum):
     """Why the campaign ended normally."""
 
-    TARGET_REACHED = "target reached"
+    TARGET_REACHED = "funds target reached"
+    SCIENCE_REACHED = "science target reached"
     NO_CONTRACTS = "no tourism contracts left that the campaign can fly"
     FLIGHT_LIMIT = "flight limit reached"
     ALARM = "a game alarm goes off before the next flight would be back"
@@ -82,7 +83,8 @@ class CampaignOptions:
 
     Attributes:
         craft: Name of the VAB craft to launch.
-        target_funds: Stop once the funds reach this amount.
+        target_funds: Stop once the funds reach this amount
+            (``math.inf``: never).
         seats: Passenger seats of the craft (the pilot's seat excluded)
             for the first flight; ``None`` assumes ``DEFAULT_SEATS``. Each
             launch reads the real number from the craft, which the next
@@ -109,6 +111,8 @@ class CampaignOptions:
         alarm_margin: Game seconds ahead that must be free of game alarms
             for a flight to start (an orbital flight takes about 45
             minutes); ``None`` ignores the alarms.
+        target_science: Stop once the science points reach this amount
+            (to buy a technology, say); ``None``: never.
     """
 
     craft: str
@@ -124,6 +128,7 @@ class CampaignOptions:
     max_declines: int = 10
     vessel_prefix: str | None = "Cruise"
     alarm_margin: float | None = 3600.0
+    target_science: float | None = None
 
     @property
     def boarding_mission(self) -> Mission:
@@ -206,6 +211,8 @@ class CampaignResult:
         start_funds: Balance when it started.
         end_funds: Balance when it stopped.
         alarm: The game alarm that stopped it, for ``StopReason.ALARM``.
+        start_science: Science points when it started.
+        end_science: Science points when it stopped.
     """
 
     reason: StopReason
@@ -213,6 +220,8 @@ class CampaignResult:
     start_funds: float
     end_funds: float
     alarm: GameAlarm | None = None
+    start_science: float = 0.0
+    end_science: float = 0.0
 
 
 class TourismCampaign:
@@ -320,7 +329,7 @@ class TourismCampaign:
                                max_mission=self._options.boarding_mission)
 
     def run(self, on_flight: Callable[[FlightSummary], None] | None = None) -> CampaignResult:
-        """Fly until the target is reached or no contract is left.
+        """Fly until a target (funds or science) is reached or no contract is left.
 
         Args:
             on_flight: Called after each flight, for progress output, also
@@ -337,22 +346,29 @@ class TourismCampaign:
         options = self._options
         self._on_flight = on_flight
         start_funds = self._retry(self._game.funds)
+        start_science = self._retry(self._game.science)
         flights: list[FlightSummary] = []
+
+        def stop(reason: StopReason, alarm: GameAlarm | None = None) -> CampaignResult:
+            return CampaignResult(reason, tuple(flights), start_funds, funds, alarm=alarm,
+                                  start_science=start_science, end_science=science)
+
         while True:
             funds = self._retry(self._game.funds)
+            science = self._retry(self._game.science)
             if self.stop_requested:
-                return CampaignResult(StopReason.STOP_REQUESTED, tuple(flights), start_funds,
-                                      funds)
+                return stop(StopReason.STOP_REQUESTED)
             if funds >= options.target_funds:
-                return CampaignResult(StopReason.TARGET_REACHED, tuple(flights), start_funds, funds)
+                return stop(StopReason.TARGET_REACHED)
+            if options.target_science is not None and science >= options.target_science:
+                return stop(StopReason.SCIENCE_REACHED)
             if options.max_flights is not None and len(flights) >= options.max_flights:
-                return CampaignResult(StopReason.FLIGHT_LIMIT, tuple(flights), start_funds, funds)
+                return stop(StopReason.FLIGHT_LIMIT)
             # Before anything is accepted or launched: the player is about
             # to be needed elsewhere.
             alarm = self.alarm_in_the_way()
             if alarm is not None:
-                return CampaignResult(StopReason.ALARM, tuple(flights), start_funds, funds,
-                                      alarm=alarm)
+                return stop(StopReason.ALARM, alarm)
 
             self._check_no_vessel_in_flight()
             # Before planning: the crew of a vessel on the pad is not
@@ -363,11 +379,10 @@ class TourismCampaign:
                 plan = self._make_room_for_offers(plan)
             if self.stop_requested:
                 # Asked while offers were being declined: accept nothing.
-                return CampaignResult(StopReason.STOP_REQUESTED, tuple(flights), start_funds,
-                                      funds)
+                return stop(StopReason.STOP_REQUESTED)
             plan = self._accept(plan)
             if plan.is_empty:
-                return CampaignResult(StopReason.NO_CONTRACTS, tuple(flights), start_funds, funds)
+                return stop(StopReason.NO_CONTRACTS)
 
             flights.append(self._flight(len(flights) + 1, plan))
 

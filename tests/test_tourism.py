@@ -529,6 +529,7 @@ class SimulatedHop(TourismGamePort):
     def remove_nodes(self): raise NotImplementedError
     def pointing_error(self): raise NotImplementedError
     def funds(self) -> float: raise NotImplementedError
+    def science(self) -> float: raise NotImplementedError
     def read_tourism_contracts(self): raise NotImplementedError
     def accept_contract(self, contract_id): raise NotImplementedError
     def contract_status(self, contract_id): raise NotImplementedError
@@ -704,6 +705,9 @@ class FakeGame(TourismGamePort):
         self.launches: list[tuple[str, list[str]]] = []
         self.names: list[str | None] = []
         self.launch_name = "Passatgers v1.1"
+        # Science points, and what each delivered tourist brings.
+        self._science = 150.0
+        self.science_per_tourist = 0.0
         # Alarm clock; each launch brings every alarm 45 minutes closer.
         self.alarms: list[GameAlarm] = []
         self.aboard: list[str] = []
@@ -716,6 +720,9 @@ class FakeGame(TourismGamePort):
 
     def funds(self) -> float:
         return self._funds
+
+    def science(self) -> float:
+        return self._science
 
     def read_tourism_contracts(self) -> list[TourismContract]:
         return [c for c in self.contracts.values()
@@ -778,6 +785,7 @@ class FakeGame(TourismGamePort):
             for t in c.tourists:
                 if not t.completed and t.kerbal in on_board:
                     self._funds += t.reward
+                    self._science += self.science_per_tourist
                     t = replace(t, completed=True)
                 tourists.append(t)
             status = (ContractStatus.COMPLETED if all(t.completed for t in tourists)
@@ -1392,6 +1400,7 @@ class SimulatedOrbit(TourismGamePort):
     def read_alarms(self): raise NotImplementedError
     def read_crew(self): raise NotImplementedError
     def funds(self) -> float: raise NotImplementedError
+    def science(self) -> float: raise NotImplementedError
     def read_tourism_contracts(self): raise NotImplementedError
     def accept_contract(self, contract_id): raise NotImplementedError
     def contract_status(self, contract_id): raise NotImplementedError
@@ -1689,3 +1698,38 @@ def test_two_step_interrupt_asks_first_and_forces_second():
         with pytest.raises(KeyboardInterrupt):
             interrupt.handle(signal.SIGINT, None)  # second: stop now
     assert signal.getsignal(signal.SIGINT) == before
+
+
+def test_campaign_stops_once_the_science_target_is_reached():
+    """150 points, 160 wanted, 4 points per tourist: the first flight (4 tourists) is enough."""
+    game = FakeGame(_offers())
+    game.science_per_tourist = 4.0
+    campaign, _ = _campaign(game, target=math.inf, target_science=160.0)
+    result = campaign.run()
+    assert result.reason is StopReason.SCIENCE_REACHED
+    assert len(result.flights) == 1
+    assert (result.start_science, result.end_science) == (150.0, 166.0)
+
+
+def test_campaign_stops_at_whichever_target_comes_first():
+    game = FakeGame(_offers())
+    game.science_per_tourist = 0.1  # science far away
+    campaign, _ = _campaign(game, target=100_001, target_science=160.0)
+    assert campaign.run().reason is StopReason.TARGET_REACHED
+
+
+def test_campaign_without_targets_flies_until_no_contracts_are_left():
+    game = FakeGame(_offers())
+    campaign, _ = _campaign(game, target=math.inf)
+    assert campaign.run().reason is StopReason.NO_CONTRACTS
+
+
+def test_tourism_command_line_needs_a_target():
+    from ksp_control.entrypoints.tourism import parse_args
+
+    assert parse_args(["--craft", "X", "--science-target", "160"]).funds_target is None
+    assert parse_args(["--craft", "X", "--funds-target", "5"]).science_target is None
+    # A flight limit is a limit too.
+    assert parse_args(["--craft", "X", "--max-flights", "1"]).funds_target is None
+    with pytest.raises(SystemExit):
+        parse_args(["--craft", "X"])
