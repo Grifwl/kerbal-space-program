@@ -22,6 +22,7 @@ left.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -72,6 +73,7 @@ class StopReason(Enum):
     NO_CONTRACTS = "no tourism contracts left that the campaign can fly"
     FLIGHT_LIMIT = "flight limit reached"
     ALARM = "a game alarm goes off before the next flight would be back"
+    STOP_REQUESTED = "stop requested"
 
 
 @dataclass(frozen=True)
@@ -275,6 +277,22 @@ class TourismCampaign:
         self._sleep = sleep
         self._seats = options.seats if options.seats is not None else DEFAULT_SEATS
         self._on_flight: Callable[[FlightSummary], None] | None = None
+        # Set from another thread or a signal handler (Ctrl+C).
+        self._stop = threading.Event()
+
+    def request_stop(self) -> None:
+        """Ask the campaign to stop at the next safe point.
+
+        A flight under way is finished first: landed, recovered and its
+        tourists paid. No contract is accepted and nothing is launched
+        afterwards. Safe to call from a signal handler or another thread.
+        """
+        self._stop.set()
+
+    @property
+    def stop_requested(self) -> bool:
+        """Whether ``request_stop`` has been called."""
+        return self._stop.is_set()
 
     @property
     def seats(self) -> int:
@@ -322,6 +340,9 @@ class TourismCampaign:
         flights: list[FlightSummary] = []
         while True:
             funds = self._retry(self._game.funds)
+            if self.stop_requested:
+                return CampaignResult(StopReason.STOP_REQUESTED, tuple(flights), start_funds,
+                                      funds)
             if funds >= options.target_funds:
                 return CampaignResult(StopReason.TARGET_REACHED, tuple(flights), start_funds, funds)
             if options.max_flights is not None and len(flights) >= options.max_flights:
@@ -340,6 +361,10 @@ class TourismCampaign:
             plan = self._retry(self.next_plan)
             if plan.seats_used < self._seats and options.decline_types:
                 plan = self._make_room_for_offers(plan)
+            if self.stop_requested:
+                # Asked while offers were being declined: accept nothing.
+                return CampaignResult(StopReason.STOP_REQUESTED, tuple(flights), start_funds,
+                                      funds)
             plan = self._accept(plan)
             if plan.is_empty:
                 return CampaignResult(StopReason.NO_CONTRACTS, tuple(flights), start_funds, funds)
@@ -420,7 +445,7 @@ class TourismCampaign:
         options = self._options
         before = plan.seats_used
         declined = 0
-        while plan.seats_used < self._seats:
+        while plan.seats_used < self._seats and not self.stop_requested:
             offers = self._retry(self._game.read_offers)
             unwanted = offers_to_decline(offers, options.decline_types)
             if not unwanted:
@@ -454,7 +479,7 @@ class TourismCampaign:
             The new offers; empty when none came within ``offer_wait``.
         """
         waited = 0.0
-        while waited < self._options.offer_wait:
+        while waited < self._options.offer_wait and not self.stop_requested:
             self._sleep(5.0)
             waited += 5.0
             new = [o for o in self._retry(self._game.read_offers) if o.contract_id not in known]

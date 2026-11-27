@@ -1629,3 +1629,63 @@ def test_campaign_ignores_alarms_without_a_margin():
     game.alarms = [GameAlarm("Soon", 60.0)]
     campaign, _ = _campaign(game, target=1_000_000, alarm_margin=None)
     assert campaign.run().reason is StopReason.NO_CONTRACTS
+
+
+def test_stop_request_finishes_the_flight_under_way_then_stops():
+    game = FakeGame(_offers())
+    flight = FakeFlight()
+    campaign, recovery = _campaign(game, target=1_000_000, flight=flight)
+    original = flight.__call__
+
+    def fly_and_press_ctrl_c(*args, **kwargs):
+        campaign.request_stop()  # Ctrl+C during the first flight
+        return original(*args, **kwargs)
+
+    campaign._fly = fly_and_press_ctrl_c
+    result = campaign.run()
+    assert result.reason is StopReason.STOP_REQUESTED
+    # The flight was finished: recovered and its tourists paid.
+    assert len(result.flights) == 1 and result.flights[0].delivered == 4
+    assert "Passatgers v1.1" in recovery.recovered
+    # Nothing else was accepted.
+    assert len(game.launches) == 1
+    assert [c.status for c in game.contracts.values()].count(ContractStatus.OFFERED) == 1
+
+
+def test_stop_request_before_a_flight_accepts_and_launches_nothing():
+    game = FakeGame(_offers())
+    campaign, _ = _campaign(game, target=1_000_000)
+    campaign.request_stop()
+    result = campaign.run()
+    assert result.reason is StopReason.STOP_REQUESTED and result.flights == ()
+    assert game.launches == []
+    assert all(c.status is ContractStatus.OFFERED for c in game.contracts.values())
+
+
+def test_stop_request_while_declining_offers_accepts_nothing():
+    from ksp_control.domain.tourism import PART_TEST_TYPE
+
+    game = FakeGame([contract("p1", ["Samroda", "Robala"], reward=26_000)])
+    game.other_offers = [_part_test("t1"), _part_test("t2")]
+    campaign, _ = _campaign(game, target=1_000_000, decline_types=(PART_TEST_TYPE,))
+    campaign._sleep = lambda seconds: campaign.request_stop()  # Ctrl+C while waiting
+    result = campaign.run()
+    assert result.reason is StopReason.STOP_REQUESTED
+    assert game.declined == ["t1"] and game.launches == []
+    assert all(c.status is ContractStatus.OFFERED for c in game.contracts.values())
+
+
+def test_two_step_interrupt_asks_first_and_forces_second():
+    import signal
+
+    from ksp_control.adapters.interrupt import TwoStepInterrupt
+
+    asked = []
+    before = signal.getsignal(signal.SIGINT)
+    with TwoStepInterrupt(lambda: asked.append(True)) as interrupt:
+        assert signal.getsignal(signal.SIGINT) == interrupt.handle
+        interrupt.handle(signal.SIGINT, None)  # first Ctrl+C: a request
+        assert asked == [True] and interrupt.requested
+        with pytest.raises(KeyboardInterrupt):
+            interrupt.handle(signal.SIGINT, None)  # second: stop now
+    assert signal.getsignal(signal.SIGINT) == before

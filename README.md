@@ -371,8 +371,17 @@ The campaign stops, and asks you to look, when something does not go to
 plan: a tourist whose itinerary is not completed after the recovery, a
 flight that did not reach space (or orbit, when it had to), no pilot
 available, or a vessel lost.
-Ctrl+C stops it at any time; a vessel in flight is then yours. It never
-launches while the active vessel is flying. A vessel waiting on the launch
+
+**Ctrl+C** asks the campaign to stop without dropping the vessel: the
+flight under way, if any, goes on until it has landed, been recovered and
+its tourists paid; then the campaign stops, with no new contract accepted
+and nothing launched (pressed while offers are being declined, it stops
+before accepting anything). A **second Ctrl+C** stops it at once: the
+autopilot lets go, the throttle goes to zero and the vessel is yours, as
+it is. A Ctrl+C pressed during a time warp takes effect when the warp
+ends.
+
+It never launches while the active vessel is flying. A vessel waiting on the launch
 pad with its crew (a flight reverted to launch) is recovered before the
 next launch, which refunds it and brings the crew back: launching on top
 of it lets KSP recover the crew only half way (it cannot remove the active

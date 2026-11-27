@@ -4,8 +4,9 @@ Each flight accepts the tourism contracts of Kerbin (suborbital flights and
 orbits) that fill the craft, launches it with a pilot (taking turns) and
 the tourists, flies above the atmosphere (and into orbit when a tourist
 wants it), lands under parachutes, recovers the vessel and its debris and
-starts again. Stop it at any time with Ctrl+C (the vessel in flight is then
-left to you).
+starts again. Ctrl+C asks it to stop once the flight under way has landed
+and been recovered (no more contracts are accepted); a second Ctrl+C stops
+it at once, leaving the vessel in flight to you.
 
 Examples:
     See what the next flight would carry, without touching the game::
@@ -31,6 +32,7 @@ import sys
 from ksp_control.adapters.game.krpc_connection import KrpcEndpoint
 from ksp_control.adapters.game.krpc_fleet import KrpcFleet
 from ksp_control.adapters.game.krpc_tourism import KrpcTourismGame
+from ksp_control.adapters.interrupt import TwoStepInterrupt
 from ksp_control.adapters.names import person_names
 from ksp_control.adapters.persistence.json_vessel_designs import JsonVesselDesigns
 from ksp_control.application.ports import GameUnavailableError
@@ -264,7 +266,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.dry_run:
             return _dry_run(game, campaign, options)
-        result = campaign.run(on_flight=lambda s: logger.info(format_summary(s)))
+        def stop_after_this_flight() -> None:
+            logger.warning("Ctrl+C: no more contracts; stopping once the flight under way (if "
+                           "any) has landed and been recovered. Press Ctrl+C again to stop now "
+                           "and leave the vessel as it is.")
+            campaign.request_stop()
+
+        with TwoStepInterrupt(stop_after_this_flight):
+            result = campaign.run(on_flight=lambda s: logger.info(format_summary(s)))
         if result.alarm is not None:
             logger.warning("Game alarm \"%s\" %s: not launching another flight",
                            result.alarm.title, _when(result.alarm.seconds_away))
