@@ -700,6 +700,7 @@ class FakeGame(TourismGamePort):
         self.capacity = capacity  # pilot seat included
         self.launches: list[tuple[str, list[str]]] = []
         self.names: list[str | None] = []
+        self.launch_name = "Passatgers v1.1"
         self.aboard: list[str] = []
         # Offers that are not tourism, and what KSP offers after a decline.
         self.other_offers: list[OfferedContract] = []
@@ -750,7 +751,7 @@ class FakeGame(TourismGamePort):
         self.names.append(name)
         self.aboard = crew[:self.capacity]  # who does not fit stays behind
         self._funds -= 12_000  # the vessel is paid at launch
-        return "Passatgers v1.1"
+        return self.launch_name
 
     def finish_flight(self) -> None:
         """What recovering the tourists does: complete and pay.
@@ -1541,3 +1542,42 @@ def test_campaign_keeps_the_craft_name_without_a_prefix():
     campaign.run()
     assert game.names and set(game.names) == {None}
 
+
+class FakeDesigns:
+    """Remembers the designs recorded by the campaign."""
+
+    def __init__(self) -> None:
+        self.recorded: dict[str, str] = {}
+
+    def designs(self) -> dict[str, str]:
+        return dict(self.recorded)
+
+    def record(self, vessel: str, design: str) -> None:
+        self.recorded[vessel] = design
+
+
+def test_campaign_records_the_design_of_each_renamed_vessel():
+    game = FakeGame(_offers())
+    game.launch_name = "Cruise John Doe"
+    recovery = FakeRecovery(game, ["Cruise John Doe", "Escombros de Cruise John Doe"])
+    designs = FakeDesigns()
+    campaign = TourismCampaign(game, FakeFlight(True), recovery,
+                               CampaignOptions("Passatgers v1.1", 10_000_000, max_flights=1),
+                               sleep=lambda s: None, person_name=lambda: "John Doe",
+                               designs=designs)
+    campaign.run()
+    assert designs.recorded == {"Cruise John Doe": "Passatgers v1.1"}
+
+
+def test_json_vessel_designs_round_trip(tmp_path):
+    from ksp_control.adapters.persistence.json_vessel_designs import JsonVesselDesigns
+
+    path = tmp_path / "sub" / "designs.json"
+    registry = JsonVesselDesigns(path)
+    assert registry.designs() == {}
+    registry.record("Cruise John Doe", "Passatgers v1.3")
+    registry.record("Cruise Jane Roe", "Passatgers v1.3")
+    assert JsonVesselDesigns(path).designs() == {
+        "Cruise John Doe": "Passatgers v1.3", "Cruise Jane Roe": "Passatgers v1.3"}
+    path.write_text("not json", encoding="utf-8")
+    assert registry.designs() == {}  # a broken file reads as empty, never fails

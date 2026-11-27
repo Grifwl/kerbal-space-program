@@ -21,6 +21,7 @@ from ksp_control.application.ports import (
     EconomyRepositoryPort,
     GameTelemetryPort,
     GameUnavailableError,
+    VesselDesignsPort,
 )
 from ksp_control.domain.ledger import LedgerAnalyzer, LedgerSummary
 from ksp_control.domain.model import (
@@ -93,6 +94,7 @@ class EconomyMonitorService:
         repository: EconomyRepositoryPort,
         analyzer: LedgerAnalyzer | None = None,
         heartbeat: timedelta = timedelta(seconds=30),
+        designs: VesselDesignsPort | None = None,
     ) -> None:
         """Create the service.
 
@@ -102,7 +104,11 @@ class EconomyMonitorService:
             analyzer: Ledger rules; a default instance is used when omitted.
             heartbeat: Maximum time between two stored samples when nothing
                 changes.
+            designs: Craft designs of vessels renamed by other scripts, to
+                group the per-vessel table by design; ``None`` groups by
+                vessel name.
         """
+        self._designs = designs
         self._telemetry = telemetry
         self._repository = repository
         self._analyzer = analyzer or LedgerAnalyzer()
@@ -191,7 +197,8 @@ class EconomyMonitorService:
             current=self._repository.last_sample(),
             baseline=self._repository.first_sample(),
             samples=self._repository.list_samples(limit=sample_limit),
-            summary=LedgerSummary.from_events(all_events),
+            summary=LedgerSummary.from_events(
+                all_events, self._designs.designs() if self._designs else None),
             recent_events=all_events[:event_limit],
         )
 

@@ -28,7 +28,11 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TypeVar
 
-from ksp_control.application.ports import GameUnavailableError, TourismGamePort
+from ksp_control.application.ports import (
+    GameUnavailableError,
+    TourismGamePort,
+    VesselDesignsPort,
+)
 from ksp_control.application.tourism_flight import FlightReport, NotEnoughDeltaVError
 from ksp_control.application.vessel_recovery import VesselRecoveryService
 from ksp_control.domain.ledger import owner_vessel
@@ -233,6 +237,7 @@ class TourismCampaign:
         options: CampaignOptions,
         sleep: Callable[[float], None] = time.sleep,
         person_name: Callable[[], str] | None = None,
+        designs: VesselDesignsPort | None = None,
     ) -> None:
         """Create the campaign.
 
@@ -249,9 +254,12 @@ class TourismCampaign:
             person_name: Gives an invented person's name for each vessel
                 (with ``options.vessel_prefix``); ``None`` keeps the craft's
                 name.
+            designs: Where to record the craft of each renamed vessel, so
+                the economy monitor adds up the flights of one design.
         """
         self._game = game
         self._person_name = person_name
+        self._designs = designs
         self._fly = fly
         self._recovery = recovery
         self._options = options
@@ -500,6 +508,8 @@ class TourismCampaign:
 
         funds_before = self._retry(self._game.funds)
         vessel = self._game.launch(options.craft, [pilot, *tourists], self._vessel_name())
+        if self._designs is not None and vessel != options.craft:
+            self._designs.record(vessel, options.craft)
         launch_cost = funds_before - self._retry(self._game.funds)
         plan = self._check_crew(plan)
         if not options.orbit_test:

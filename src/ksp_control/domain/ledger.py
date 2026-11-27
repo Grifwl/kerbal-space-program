@@ -20,6 +20,7 @@ change in balances, even when an attribution is imperfect.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from itertools import combinations
 
@@ -446,7 +447,8 @@ class VesselEconomics:
     """Money spent and recovered for all launches of one vessel design.
 
     Attributes:
-        name: Vessel name.
+        name: Craft design (the vessel name, unless a script renamed the
+            vessel and recorded its design).
         launches: Number of launches that were not reverted.
         cost: Total funds charged at launch (negative).
         recovered: Funds returned by recoveries (positive).
@@ -547,15 +549,22 @@ class LedgerSummary:
         ]
 
     @classmethod
-    def from_events(cls, events: list[LedgerEvent]) -> "LedgerSummary":
+    def from_events(cls, events: list[LedgerEvent],
+                    designs: Mapping[str, str] | None = None) -> "LedgerSummary":
         """Aggregate a list of ledger events.
 
         Args:
             events: Events in any order.
+            designs: Craft design of renamed vessels (vessel name ->
+                design), so that "Cruise John Doe" and "Cruise Jane Roe"
+                add up under "Passatgers v1.3". Looked up when summarizing,
+                not when the event happened, so it also groups events
+                recorded before the design was known.
 
         Returns:
             The summary of all the events.
         """
+        designs = designs or {}
         totals = Counter[str]()
         vessels: dict[str, dict[str, float]] = {}
 
@@ -584,8 +593,9 @@ class LedgerSummary:
                 # Several debris recovered at once share one event; the
                 # first name is enough to find the vessel they came from.
                 first_name = (event.vessel or "Unknown vessel").split(", ")[0]
+                owner = owner_vessel(first_name)
                 stats = vessels.setdefault(
-                    owner_vessel(first_name),
+                    designs.get(owner, owner),
                     {"launches": 0, "cost": 0.0, "recovered": 0.0},
                 )
                 if kind is EventKind.VESSEL_LAUNCHED:

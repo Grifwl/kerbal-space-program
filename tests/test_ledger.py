@@ -342,3 +342,30 @@ def test_debris_recoveries_count_for_their_vessel(analyzer):
     events = [e for a, b in zip(s, s[1:]) for e in analyzer.compare(a, b)]
     (vessel,) = LedgerSummary.from_events(events).vessels
     assert (vessel.name, vessel.cost, vessel.recovered) == ("Kerbal X", -40_000, 4_000)
+
+
+def test_renamed_vessels_add_up_under_their_design(analyzer):
+    """Two cruises of one craft, and the debris of one, make one line."""
+    s = [
+        snap(0, 100_000, scene=GameScene.EDITOR_VAB),
+        # The monitor may read the craft name before the script renames it.
+        replace(snap(1, 80_000, scene=GameScene.FLIGHT, vessel="Passatgers v1.3"),
+                vessels=("Passatgers v1.3",)),
+        replace(snap(2, 81_000, scene=GameScene.FLIGHT, vessel="Cruise John Doe"),
+                vessels=("Cruise John Doe", "Escombros de Cruise John Doe")),
+        replace(snap(3, 81_000, scene=GameScene.FLIGHT, vessel="Cruise John Doe"),
+                vessels=("Cruise John Doe",)),
+        snap(4, 85_000, scene=GameScene.SPACE_CENTER),
+        snap(5, 85_000, scene=GameScene.EDITOR_VAB),
+        snap(6, 65_000, scene=GameScene.FLIGHT, vessel="Cruise Jane Roe"),
+        snap(7, 69_000, scene=GameScene.SPACE_CENTER),
+    ]
+    s[2] = replace(s[2], resources=s[1].resources)  # debris still up
+    s[3] = replace(s[3], resources=replace(s[1].resources, funds=81_000))
+    events = [e for a, b in zip(s, s[1:]) for e in analyzer.compare(a, b)]
+    designs = {"Cruise John Doe": "Passatgers v1.3", "Cruise Jane Roe": "Passatgers v1.3"}
+    (vessel,) = LedgerSummary.from_events(events, designs).vessels
+    assert vessel.name == "Passatgers v1.3"
+    assert (vessel.launches, vessel.cost, vessel.recovered) == (2, -40_000, 9_000)
+    # Without the designs, each cruise is a line of its own.
+    assert len(LedgerSummary.from_events(events).vessels) == 3

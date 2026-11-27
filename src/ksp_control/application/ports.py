@@ -208,6 +208,32 @@ class FleetPort(ABC):
         """Release any connection held by the adapter."""
 
 
+class VesselDesignsPort(ABC):
+    """Remembers the craft design renamed vessels were launched from.
+
+    A script that renames the vessels it launches ("Cruise John Doe")
+    records the craft ("Passatgers v1.3"), so the economy monitor can add
+    up every flight of the same design.
+    """
+
+    @abstractmethod
+    def designs(self) -> dict[str, str]:
+        """Read every known vessel and its design.
+
+        Returns:
+            Vessel name -> craft design (empty when nothing is known).
+        """
+
+    @abstractmethod
+    def record(self, vessel: str, design: str) -> None:
+        """Remember the design of a vessel; never fails.
+
+        Args:
+            vessel: Vessel name.
+            design: Craft it was launched from.
+        """
+
+
 class NoticeLevel(Enum):
     """What a message means to the player; adapters pick the colour."""
 

@@ -204,3 +204,27 @@ def test_vip_mission_with_unflagged_objective_across_a_restart():
         ("vessel_recovered", 7_471.88),
     ]
     assert repository.paid_objectives() == set()  # forgotten once finished
+
+
+def test_dashboard_groups_renamed_vessels_by_their_recorded_design(tmp_path):
+    """A cruise renamed by ksp-tourism shows under its craft in the vessel table."""
+    from tests.test_ledger import ORBIT, TEST, snap
+    from ksp_control.adapters.persistence.json_vessel_designs import JsonVesselDesigns
+    from ksp_control.domain.model import GameScene
+
+    book = {"active": (TEST,), "completed": (ORBIT,)}
+    script = [
+        snap(0, 100_000, scene=GameScene.EDITOR_VAB, **book),
+        snap(1, 100_000, scene=GameScene.EDITOR_VAB, **book),
+        snap(2, 80_000, scene=GameScene.FLIGHT, vessel="Cruise John Doe", **book),
+        snap(3, 84_000, scene=GameScene.SPACE_CENTER, **book),
+    ]
+    designs = JsonVesselDesigns(tmp_path / "designs.json")
+    repository = SqliteEconomyRepository(":memory:")
+    service = EconomyMonitorService(ScriptedTelemetry(script), repository, designs=designs)
+    for _ in script:
+        service.poll_once()
+    # Recorded by the tourism script after the monitor booked the launch.
+    designs.record("Cruise John Doe", "Passatgers v1.3")
+    (vessel,) = service.dashboard().summary.vessels
+    assert (vessel.name, vessel.launches, vessel.net) == ("Passatgers v1.3", 1, -16_000)

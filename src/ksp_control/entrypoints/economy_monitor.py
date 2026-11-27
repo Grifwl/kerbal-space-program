@@ -20,6 +20,7 @@ from pathlib import Path
 from ksp_control.adapters.game.krpc_connection import KrpcEndpoint
 from ksp_control.adapters.game.krpc_telemetry import KrpcTelemetry
 from ksp_control.adapters.game.simulated_telemetry import SimulatedTelemetry
+from ksp_control.adapters.persistence.json_vessel_designs import JsonVesselDesigns
 from ksp_control.adapters.persistence.sqlite_repository import SqliteEconomyRepository
 from ksp_control.adapters.polling import PollingLoop
 from ksp_control.adapters.web.app import create_app
@@ -41,6 +42,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--db", default="data/career.sqlite",
                         help="SQLite file for this career (use one file per save game).")
+    parser.add_argument("--designs", default="data/vessel-designs.json",
+                        help="Craft designs of vessels renamed by other scripts (ksp-tourism "
+                             "writes it), to add up the flights of one design.")
     parser.add_argument("--krpc-address", default="127.0.0.1", help="kRPC server address.")
     parser.add_argument("--krpc-port", type=int, default=50000,
                         help="Port of the kRPC TCP/IP server.")
@@ -85,7 +89,8 @@ def main(argv: list[str] | None = None) -> None:
     # The demo writes to a throwaway database so it never pollutes a career.
     db_path = Path(tempfile.mkdtemp()) / "demo.sqlite" if args.demo else Path(args.db)
     repository = SqliteEconomyRepository(db_path)
-    service = EconomyMonitorService(build_telemetry(args), repository)
+    service = EconomyMonitorService(build_telemetry(args), repository,
+                                    designs=JsonVesselDesigns(args.designs))
     poller = PollingLoop(service, interval=args.interval)
 
     logging.getLogger(__name__).info(

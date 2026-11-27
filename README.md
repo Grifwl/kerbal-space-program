@@ -86,7 +86,16 @@ To try the dashboard without the game, run a simulated career:
 
 Options: `--krpc-address`, `--krpc-port`, `--interval`
 (seconds between readings), `--host` (`0.0.0.0` to view it from another
-device on your network), `--port`, `-v`.
+device on your network), `--port`, `--designs`, `-v`.
+
+The cost per vessel is grouped by **craft design**. KSP forgets which
+craft a vessel was built from once it is renamed, so the scripts that
+rename what they launch (`ksp-tourism` names each flight "Cruise John
+Doe") record it in `data/vessel-designs.json` (`--designs`), e.g.
+`{"Cruise John Doe": "Passatgers v1.3"}`. The monitor reads it whenever it
+builds the table, so every cruise and its debris add up under
+"Passatgers v1.3", including flights recorded before the file had them.
+Vessels missing from the file are grouped by their own name.
 
 ### Limitations
 
@@ -379,8 +388,9 @@ flight summary shows it under "recovery and other".
 Every launched vessel is renamed on the pad `Cruise <invented name>`
 ("Cruise John Doe"), so its debris carry its name too; `--vessel-prefix`
 changes the first word and `--keep-craft-name` keeps the craft's name.
-The economy monitor groups costs by vessel name, so each flight gets its
-own line there.
+The craft of each renamed vessel is recorded in `--designs` (default
+`data/vessel-designs.json`), so the economy monitor still adds up every
+flight of the same craft (see "Career economy monitor").
 
 The craft must have a probe core or a crewed command pod, parachutes in
 the last stage, and every decoupler in the stages above it. Run
@@ -497,7 +507,8 @@ src/ksp_control/
 │                        propagation, slots and probe names
 ├── application/         Use cases + ports
 │   ├── ports.py         GameTelemetryPort, EconomyRepositoryPort, FleetPort,
-│   │                    PartTestGamePort, TourismGamePort, ConstellationGamePort
+│   │                    PartTestGamePort, TourismGamePort, ConstellationGamePort,
+│   │                    VesselDesignsPort
 │   ├── economy_monitor.py
 │   ├── vessel_recovery.py
 │   ├── part_test_assistant.py
@@ -508,7 +519,7 @@ src/ksp_control/
 │   ├── game/            kRPC telemetry, fleet, part tests, tourism and constellation;
 │   │                    contract text parsing; simulated telemetry
 │   ├── names.py         Invented people's names (Faker) for vessels
-│   ├── persistence/     sqlite_repository.py
+│   ├── persistence/     sqlite_repository.py, json_vessel_designs.py
 │   ├── polling.py       Background loop (driving adapter)
 │   └── web/             Flask API + static dashboard (driving adapter)
 └── entrypoints/         Composition roots (runnable scripts)
