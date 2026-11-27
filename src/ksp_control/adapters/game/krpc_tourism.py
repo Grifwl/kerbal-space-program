@@ -48,6 +48,7 @@ from ksp_control.domain.tourism import (
     ContractStatus,
     EngineState,
     FlightTelemetry,
+    GameAlarm,
     Kerbal,
     OfferedContract,
     Propulsion,
@@ -245,6 +246,20 @@ class KrpcTourismGame(TourismGamePort):
                     can_decline=bool(remote.can_be_declined),
                 ))
             return result
+
+        return self._call(read)
+
+    def read_alarms(self) -> list[GameAlarm]:
+        """Read the alarms of the stock alarm clock.
+
+        Returns:
+            Every alarm, with the game seconds until it goes off.
+        """
+        def read(conn: Any) -> list[GameAlarm]:
+            space_center = conn.space_center
+            now = float(space_center.ut)
+            return [GameAlarm(str(alarm.title), float(alarm.time) - now)
+                    for alarm in space_center.alarm_manager.alarms]
 
         return self._call(read)
 

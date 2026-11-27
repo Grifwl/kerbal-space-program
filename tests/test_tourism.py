@@ -28,12 +28,14 @@ from ksp_control.domain.tourism import (
     EngineState,
     FlightProfile,
     FlightTelemetry,
+    GameAlarm,
     Kerbal,
     Mission,
     OfferedContract,
     Propulsion,
     Tourist,
     TourismContract,
+    alarm_in_the_way,
     apsis_burn_dv,
     burn_throttle,
     burn_time,
@@ -519,6 +521,7 @@ class SimulatedHop(TourismGamePort):
     # Unused by a suborbital hop.
     def read_offers(self): raise NotImplementedError
     def decline_contract(self, contract_id): raise NotImplementedError
+    def read_alarms(self): raise NotImplementedError
     def read_crew(self): raise NotImplementedError
     def add_node(self, ut, prograde): raise NotImplementedError
     def node_remaining_dv(self): raise NotImplementedError
@@ -701,6 +704,8 @@ class FakeGame(TourismGamePort):
         self.launches: list[tuple[str, list[str]]] = []
         self.names: list[str | None] = []
         self.launch_name = "Passatgers v1.1"
+        # Alarm clock; each launch brings every alarm 45 minutes closer.
+        self.alarms: list[GameAlarm] = []
         self.aboard: list[str] = []
         # Offers that are not tourism, and what KSP offers after a decline.
         self.other_offers: list[OfferedContract] = []
@@ -728,6 +733,9 @@ class FakeGame(TourismGamePort):
                    for c in self.contracts.values() if c.status is ContractStatus.OFFERED]
         return self.other_offers + tourism
 
+    def read_alarms(self) -> list[GameAlarm]:
+        return list(self.alarms)
+
     def decline_contract(self, contract_id: str) -> None:
         self.declined.append(contract_id)
         self.other_offers = [o for o in self.other_offers if o.contract_id != contract_id]
@@ -751,6 +759,7 @@ class FakeGame(TourismGamePort):
         self.names.append(name)
         self.aboard = crew[:self.capacity]  # who does not fit stays behind
         self._funds -= 12_000  # the vessel is paid at launch
+        self.alarms = [replace(a, seconds_away=a.seconds_away - 2_700) for a in self.alarms]
         return self.launch_name
 
     def finish_flight(self) -> None:
@@ -1380,6 +1389,7 @@ class SimulatedOrbit(TourismGamePort):
     # Unused by the director.
     def read_offers(self): raise NotImplementedError
     def decline_contract(self, contract_id): raise NotImplementedError
+    def read_alarms(self): raise NotImplementedError
     def read_crew(self): raise NotImplementedError
     def funds(self) -> float: raise NotImplementedError
     def read_tourism_contracts(self): raise NotImplementedError
@@ -1581,3 +1591,41 @@ def test_json_vessel_designs_round_trip(tmp_path):
         "Cruise John Doe": "Passatgers v1.3", "Cruise Jane Roe": "Passatgers v1.3"}
     path.write_text("not json", encoding="utf-8")
     assert registry.designs() == {}  # a broken file reads as empty, never fails
+
+
+def test_alarm_in_the_way_counts_near_and_gone_off_alarms():
+    later = GameAlarm("Mun transfer", 7_200.0)
+    soon = GameAlarm("Relay brake", 1_800.0)
+    rung = GameAlarm("Forgotten", -600.0)
+    assert alarm_in_the_way([later], 3_600.0) is None
+    assert alarm_in_the_way([later, soon], 3_600.0) == soon
+    assert alarm_in_the_way([later, soon, rung], 3_600.0) == rung
+    assert alarm_in_the_way([], 3_600.0) is None
+
+
+def test_campaign_does_not_launch_with_an_alarm_due_within_the_margin():
+    game = FakeGame(_offers())
+    game.alarms = [GameAlarm("CA-40-Muna: brake a probe", 1_800.0)]
+    campaign, _ = _campaign(game, target=1_000_000)
+    result = campaign.run()
+    assert result.reason is StopReason.ALARM
+    assert result.alarm == game.alarms[0]
+    assert game.launches == []
+    # Nothing was accepted either.
+    assert all(c.status is ContractStatus.OFFERED for c in game.contracts.values())
+
+
+def test_campaign_stops_between_flights_when_an_alarm_draws_near():
+    game = FakeGame(_offers())
+    # Free for the first flight (45 min), within the hour after it.
+    game.alarms = [GameAlarm("Minmus transfer", 5_400.0)]
+    campaign, _ = _campaign(game, target=1_000_000)
+    result = campaign.run()
+    assert result.reason is StopReason.ALARM and len(result.flights) == 1
+
+
+def test_campaign_ignores_alarms_without_a_margin():
+    game = FakeGame(_offers())
+    game.alarms = [GameAlarm("Soon", 60.0)]
+    campaign, _ = _campaign(game, target=1_000_000, alarm_margin=None)
+    assert campaign.run().reason is StopReason.NO_CONTRACTS

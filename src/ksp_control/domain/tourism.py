@@ -190,6 +190,40 @@ class TourismContract:
 
 
 @dataclass(frozen=True)
+class GameAlarm:
+    """An alarm of the game's alarm clock.
+
+    Attributes:
+        title: Its title.
+        seconds_away: Game seconds until it goes off; negative when it has
+            already gone off and is still in the alarm clock (not
+            dismissed).
+    """
+
+    title: str
+    seconds_away: float
+
+
+def alarm_in_the_way(alarms: list[GameAlarm], margin: float) -> GameAlarm | None:
+    """The first alarm a flight starting now would run into.
+
+    An orbital tourist flight takes about 45 minutes of game time, launch
+    to recovery; an alarm going off meanwhile would be missed, since the
+    player is not at the controls. An alarm that has already gone off and
+    is still in the alarm clock counts too: what it announces is due now.
+
+    Args:
+        alarms: Every alarm of the alarm clock.
+        margin: Game seconds ahead that must be free of alarms.
+
+    Returns:
+        The earliest alarm within the margin, or ``None``.
+    """
+    near = [alarm for alarm in alarms if alarm.seconds_away < margin]
+    return min(near, key=lambda alarm: alarm.seconds_away, default=None)
+
+
+@dataclass(frozen=True)
 class OfferedContract:
     """Any contract on offer in Mission Control, tourism or not.
 

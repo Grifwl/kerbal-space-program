@@ -22,6 +22,7 @@ from ksp_control.domain.tourism import (
     ContractStatus,
     EngineState,
     FlightTelemetry,
+    GameAlarm,
     Kerbal,
     OfferedContract,
     Propulsion,
@@ -401,6 +402,14 @@ class TourismGamePort(ABC):
 
         Raises:
             GameUnavailableError: When the game cannot be read.
+        """
+
+    @abstractmethod
+    def read_alarms(self) -> list[GameAlarm]:
+        """Read the alarms of the game's alarm clock.
+
+        Returns:
+            Every alarm, with the game seconds until it goes off.
         """
 
     @abstractmethod

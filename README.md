@@ -385,6 +385,17 @@ kerbal). It carries on when you switch back, so come back in time for
 the reentry and the parachutes. A first EVA also pays a milestone; the
 flight summary shows it under "recovery and other".
 
+**Game alarms**: before each flight the campaign reads the game's alarm
+clock and stops, without accepting or launching anything, when an alarm
+goes off within `--alarm-margin` minutes of game time (default 60; `0`
+ignores alarms). An orbital flight takes about 45 minutes of game time
+from launch to recovery (16 real minutes), a suborbital hop about 8, and
+during a flight nobody would be at the controls to answer the alarm.
+Alarms that have gone off and are still in the alarm clock stop it too:
+delete them once dealt with. This includes the alarms of
+`ksp-constellation`, so the campaign makes way for a relay probe that
+has to brake. `--dry-run` shows the alarm that would stop it.
+
 Every launched vessel is renamed on the pad `Cruise <invented name>`
 ("Cruise John Doe"), so its debris carry its name too; `--vessel-prefix`
 changes the first word and `--keep-craft-name` keeps the craft's name.

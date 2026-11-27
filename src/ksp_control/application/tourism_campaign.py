@@ -40,9 +40,11 @@ from ksp_control.domain.recovery import RecoveryPolicy
 from ksp_control.domain.tourism import (
     Boarding,
     ContractStatus,
+    GameAlarm,
     Mission,
     OfferedContract,
     PassengerPlan,
+    alarm_in_the_way,
     choose_pilot,
     hop_helps,
     offers_to_decline,
@@ -69,6 +71,7 @@ class StopReason(Enum):
     TARGET_REACHED = "target reached"
     NO_CONTRACTS = "no tourism contracts left that the campaign can fly"
     FLIGHT_LIMIT = "flight limit reached"
+    ALARM = "a game alarm goes off before the next flight would be back"
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,9 @@ class CampaignOptions:
         vessel_prefix: Each launched vessel is named this followed by an
             invented person's name ("Cruise John Doe"); ``None`` keeps the
             craft's name.
+        alarm_margin: Game seconds ahead that must be free of game alarms
+            for a flight to start (an orbital flight takes about 45
+            minutes); ``None`` ignores the alarms.
     """
 
     craft: str
@@ -115,6 +121,7 @@ class CampaignOptions:
     offer_wait: float = 60.0
     max_declines: int = 10
     vessel_prefix: str | None = "Cruise"
+    alarm_margin: float | None = 3600.0
 
     @property
     def boarding_mission(self) -> Mission:
@@ -196,12 +203,14 @@ class CampaignResult:
         flights: One summary per flight.
         start_funds: Balance when it started.
         end_funds: Balance when it stopped.
+        alarm: The game alarm that stopped it, for ``StopReason.ALARM``.
     """
 
     reason: StopReason
     flights: tuple[FlightSummary, ...]
     start_funds: float
     end_funds: float
+    alarm: GameAlarm | None = None
 
 
 class TourismCampaign:
@@ -317,6 +326,12 @@ class TourismCampaign:
                 return CampaignResult(StopReason.TARGET_REACHED, tuple(flights), start_funds, funds)
             if options.max_flights is not None and len(flights) >= options.max_flights:
                 return CampaignResult(StopReason.FLIGHT_LIMIT, tuple(flights), start_funds, funds)
+            # Before anything is accepted or launched: the player is about
+            # to be needed elsewhere.
+            alarm = self.alarm_in_the_way()
+            if alarm is not None:
+                return CampaignResult(StopReason.ALARM, tuple(flights), start_funds, funds,
+                                      alarm=alarm)
 
             self._check_no_vessel_in_flight()
             # Before planning: the crew of a vessel on the pad is not
@@ -330,6 +345,17 @@ class TourismCampaign:
                 return CampaignResult(StopReason.NO_CONTRACTS, tuple(flights), start_funds, funds)
 
             flights.append(self._flight(len(flights) + 1, plan))
+
+    def alarm_in_the_way(self) -> GameAlarm | None:
+        """The game alarm that keeps the next flight on the ground, if any.
+
+        Returns:
+            The earliest alarm due within ``options.alarm_margin`` (or
+            already gone off), or ``None``.
+        """
+        if self._options.alarm_margin is None:
+            return None
+        return alarm_in_the_way(self._retry(self._game.read_alarms), self._options.alarm_margin)
 
     # ------------------------------------------------------------- one round
 

@@ -100,6 +100,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--designs", default="data/vessel-designs.json",
                         help="File where the craft of each renamed vessel is recorded, so the "
                              "economy monitor adds up the flights of one design.")
+    parser.add_argument("--alarm-margin", type=float, default=60.0,
+                        help="Minutes of game time that must be free of game alarms for a "
+                             "flight to start; an orbital flight takes about 45 (default: 60, "
+                             "0: ignore alarms).")
     parser.add_argument("--max-declines", type=int, default=10,
                         help="Most offers declined before one flight (default: 10).")
     parser.add_argument("--apoapsis", type=float, default=75_000.0,
@@ -253,6 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         offer_wait=args.offer_wait,
         max_declines=args.max_declines,
         vessel_prefix=None if args.keep_craft_name else args.vessel_prefix,
+        alarm_margin=args.alarm_margin * 60.0 if args.alarm_margin > 0 else None,
     )
     campaign = TourismCampaign(game, director.fly, recovery, options, person_name=person_names(),
                                designs=JsonVesselDesigns(args.designs))
@@ -260,6 +265,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.dry_run:
             return _dry_run(game, campaign, options)
         result = campaign.run(on_flight=lambda s: logger.info(format_summary(s)))
+        if result.alarm is not None:
+            logger.warning("Game alarm \"%s\" %s: not launching another flight",
+                           result.alarm.title, _when(result.alarm.seconds_away))
         # %-style logging has no thousands separator: format it here.
         logger.info("Stopped: %s. %d flight(s), funds %s -> %s (%s)",
                     result.reason.value, len(result.flights),
@@ -284,6 +292,21 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         game.close()
         recovery.close()
+
+
+def _when(seconds_away: float) -> str:
+    """Say when an alarm goes off, in game time.
+
+    Args:
+        seconds_away: Game seconds until it goes off (negative: gone off).
+
+    Returns:
+        Text such as ``in 23 min`` or ``went off 5 min ago``.
+    """
+    minutes = abs(seconds_away) / 60.0
+    if seconds_away < 0:
+        return f"went off {minutes:,.0f} min ago and is still in the alarm clock"
+    return f"goes off in {minutes:,.0f} min (game time)"
 
 
 def _release(game: KrpcTourismGame) -> None:
@@ -322,6 +345,10 @@ def _dry_run(game: KrpcTourismGame, campaign: TourismCampaign, options: Campaign
         for tourist in contract.tourists:
             done = " (delivered)" if tourist.completed else ""
             print(f"      {tourist.itinerary}{done}: {'; '.join(tourist.destinations)}")
+    alarm = campaign.alarm_in_the_way()
+    if alarm is not None:
+        print(f"Game alarm \"{alarm.title}\" {_when(alarm.seconds_away)}: the campaign would "
+              "stop before launching")
     plan = campaign.next_plan()
     if plan.is_empty:
         print("Next flight: nothing to fly.")
