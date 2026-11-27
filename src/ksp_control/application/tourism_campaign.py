@@ -94,6 +94,9 @@ class CampaignOptions:
         offer_wait: Seconds to wait for a new offer after each decline.
         max_declines: Most offers declined before one flight, a guard
             against KSP offering unwanted contracts over and over.
+        vessel_prefix: Each launched vessel is named this followed by an
+            invented person's name ("Cruise John Doe"); ``None`` keeps the
+            craft's name.
     """
 
     craft: str
@@ -107,6 +110,7 @@ class CampaignOptions:
     decline_types: tuple[str, ...] = ()
     offer_wait: float = 60.0
     max_declines: int = 10
+    vessel_prefix: str | None = "Cruise"
 
     @property
     def boarding_mission(self) -> Mission:
@@ -228,6 +232,7 @@ class TourismCampaign:
         recovery: VesselRecoveryService,
         options: CampaignOptions,
         sleep: Callable[[float], None] = time.sleep,
+        person_name: Callable[[], str] | None = None,
     ) -> None:
         """Create the campaign.
 
@@ -241,8 +246,12 @@ class TourismCampaign:
             recovery: Recovers the vessel and its debris.
             options: What the player wants.
             sleep: Function used to wait for the game to settle.
+            person_name: Gives an invented person's name for each vessel
+                (with ``options.vessel_prefix``); ``None`` keeps the craft's
+                name.
         """
         self._game = game
+        self._person_name = person_name
         self._fly = fly
         self._recovery = recovery
         self._options = options
@@ -490,7 +499,7 @@ class TourismCampaign:
                             ", ".join(t.kerbal or t.itinerary for t in boarding.left_behind))
 
         funds_before = self._retry(self._game.funds)
-        vessel = self._game.launch(options.craft, [pilot, *tourists])
+        vessel = self._game.launch(options.craft, [pilot, *tourists], self._vessel_name())
         launch_cost = funds_before - self._retry(self._game.funds)
         plan = self._check_crew(plan)
         if not options.orbit_test:
@@ -630,6 +639,17 @@ class TourismCampaign:
                 if not orbit_visited(now, self._options.body):
                     return False
         return True
+
+    def _vessel_name(self) -> str | None:
+        """Invent the name of the next vessel.
+
+        Returns:
+            ``"<prefix> <person>"``, or ``None`` to keep the craft's name.
+        """
+        prefix = self._options.vessel_prefix
+        if not prefix or self._person_name is None:
+            return None
+        return f"{prefix} {self._person_name()}"
 
     def _recover(self, vessel: str) -> float:
         """Recover the landed vessel and the pieces that came off it.

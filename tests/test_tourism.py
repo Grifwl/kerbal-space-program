@@ -699,6 +699,7 @@ class FakeGame(TourismGamePort):
         self.complete = complete
         self.capacity = capacity  # pilot seat included
         self.launches: list[tuple[str, list[str]]] = []
+        self.names: list[str | None] = []
         self.aboard: list[str] = []
         # Offers that are not tourism, and what KSP offers after a decline.
         self.other_offers: list[OfferedContract] = []
@@ -744,8 +745,9 @@ class FakeGame(TourismGamePort):
                     for t in c.tourists]
         return self.pilots + tourists
 
-    def launch(self, craft: str, crew: list[str]) -> str:
+    def launch(self, craft: str, crew: list[str], name: str | None = None) -> str:
         self.launches.append((craft, crew))
+        self.names.append(name)
         self.aboard = crew[:self.capacity]  # who does not fit stays behind
         self._funds -= 12_000  # the vessel is paid at launch
         return "Passatgers v1.1"
@@ -855,13 +857,13 @@ class FakeFlight:
 
 
 def _campaign(game: FakeGame, target: float, reached_space: bool = True,
-              flight: FakeFlight | None = None, **options):
+              flight: FakeFlight | None = None, person_name=None, **options):
     """A campaign with a fake flight and recovery."""
     recovery = FakeRecovery(game, ["Passatgers v1.1", "Escombros de Passatgers v1.1", "Rover"])
     fly = flight or FakeFlight(reached_space)
     campaign = TourismCampaign(game, fly, recovery,
                                CampaignOptions("Passatgers v1.1", target, **options),
-                               sleep=lambda s: None)
+                               sleep=lambda s: None, person_name=person_name)
     return campaign, recovery
 
 
@@ -1523,3 +1525,19 @@ def test_ascent_pitch_turns_gradually():
     assert ascent_pitch(500, 1_000, 10_000, 80) == 90
     assert ascent_pitch(5_500, 1_000, 10_000, 80) == pytest.approx(85)
     assert ascent_pitch(30_000, 1_000, 10_000, 80) == 80
+
+
+def test_campaign_names_each_vessel_after_an_invented_person():
+    people = iter(["John Doe", "Jane Roe", "Max Mustermann"])
+    game = FakeGame(_offers())
+    campaign, _ = _campaign(game, 10_000_000, person_name=lambda: next(people))
+    campaign.run()
+    assert game.names[:2] == ["Cruise John Doe", "Cruise Jane Roe"]
+
+
+def test_campaign_keeps_the_craft_name_without_a_prefix():
+    game = FakeGame(_offers())
+    campaign, _ = _campaign(game, 10_000_000, person_name=lambda: "John Doe", vessel_prefix=None)
+    campaign.run()
+    assert game.names and set(game.names) == {None}
+

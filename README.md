@@ -376,6 +376,12 @@ kerbal). It carries on when you switch back, so come back in time for
 the reentry and the parachutes. A first EVA also pays a milestone; the
 flight summary shows it under "recovery and other".
 
+Every launched vessel is renamed on the pad `Cruise <invented name>`
+("Cruise John Doe"), so its debris carry its name too; `--vessel-prefix`
+changes the first word and `--keep-craft-name` keeps the craft's name.
+The economy monitor groups costs by vessel name, so each flight gets its
+own line there.
+
 The craft must have a probe core or a crewed command pod, parachutes in
 the last stage, and every decoupler in the stages above it. Run
 `--max-flights 1` the first time to check a new craft. Do not run

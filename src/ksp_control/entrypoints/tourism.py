@@ -31,6 +31,7 @@ import sys
 from ksp_control.adapters.game.krpc_connection import KrpcEndpoint
 from ksp_control.adapters.game.krpc_fleet import KrpcFleet
 from ksp_control.adapters.game.krpc_tourism import KrpcTourismGame
+from ksp_control.adapters.names import person_names
 from ksp_control.application.ports import GameUnavailableError
 from ksp_control.application.tourism_flight import FlightError, TourismFlightDirector
 from ksp_control.application.tourism_campaign import (
@@ -90,6 +91,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "tourists (costs reputation).")
     parser.add_argument("--offer-wait", type=float, default=60.0,
                         help="Seconds to wait for a new offer after each decline (default: 60).")
+    parser.add_argument("--vessel-prefix", default="Cruise",
+                        help="Each launched vessel is named this plus an invented person's name, "
+                             "e.g. \"Cruise John Doe\" (default: Cruise).")
+    parser.add_argument("--keep-craft-name", action="store_true",
+                        help="Keep the craft's name for every launched vessel.")
     parser.add_argument("--max-declines", type=int, default=10,
                         help="Most offers declined before one flight (default: 10).")
     parser.add_argument("--apoapsis", type=float, default=75_000.0,
@@ -242,8 +248,9 @@ def main(argv: list[str] | None = None) -> int:
         decline_types=(PART_TEST_TYPE,) if args.decline_part_tests else (),
         offer_wait=args.offer_wait,
         max_declines=args.max_declines,
+        vessel_prefix=None if args.keep_craft_name else args.vessel_prefix,
     )
-    campaign = TourismCampaign(game, director.fly, recovery, options)
+    campaign = TourismCampaign(game, director.fly, recovery, options, person_name=person_names())
     try:
         if args.dry_run:
             return _dry_run(game, campaign, options)

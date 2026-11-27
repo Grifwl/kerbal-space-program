@@ -414,7 +414,7 @@ class TourismGamePort(ABC):
         """
 
     @abstractmethod
-    def launch(self, craft: str, crew: list[str]) -> str:
+    def launch(self, craft: str, crew: list[str], name: str | None = None) -> str:
         """Launch a VAB craft from the launch pad with the given crew.
 
         Blocks until the flight scene is loaded and the vessel is on the pad.
@@ -422,6 +422,8 @@ class TourismGamePort(ABC):
         Args:
             craft: Craft name as shown in the VAB.
             crew: Kerbals to board, in seat order (the pilot first).
+            name: Name to give the vessel on the pad, before anything
+                separates from it; ``None`` keeps the craft's name.
 
         Returns:
             The name of the launched vessel.

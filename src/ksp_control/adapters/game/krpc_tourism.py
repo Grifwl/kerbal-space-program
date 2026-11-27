@@ -288,12 +288,14 @@ class KrpcTourismGame(TourismGamePort):
 
         return self._call(read)
 
-    def launch(self, craft: str, crew: list[str]) -> str:
+    def launch(self, craft: str, crew: list[str], name: str | None = None) -> str:
         """Launch a VAB craft from the launch pad with the given crew.
 
         Args:
             craft: Craft name as shown in the VAB.
             crew: Kerbals to board, the pilot first.
+            name: Name to give the vessel on the pad (its debris are then
+                named after it); ``None`` keeps the craft's name.
 
         Returns:
             The name of the launched vessel.
@@ -315,7 +317,10 @@ class KrpcTourismGame(TourismGamePort):
                 crew=list(crew), recover=True,
             )
             self._chutes = None
-            return str(space_center.active_vessel.name)
+            vessel = space_center.active_vessel
+            if name:
+                vessel.name = name
+            return str(vessel.name)
 
         return self._call(launch)
 
