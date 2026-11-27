@@ -11,7 +11,12 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from ksp_control.application.ports import GameUnavailableError
+from ksp_control.application.ports import (
+    GameUnavailableError,
+    Notice,
+    NoticeLevel,
+    NoticePlacement,
+)
 from ksp_control.domain.model import GameScene
 
 logger = logging.getLogger(__name__)
@@ -20,6 +25,19 @@ logger = logging.getLogger(__name__)
 # OSError covers sockets; RuntimeError covers krpc.error.RPCError and the
 # "procedure not available in this game scene" errors.
 RECOVERABLE_ERRORS = (ConnectionError, OSError, RuntimeError, EOFError, ValueError)
+
+# On-screen message colours (RGBA) per meaning.
+NOTICE_COLOURS = {
+    NoticeLevel.SUCCESS: (0.2, 1.0, 0.3, 1.0),
+    NoticeLevel.ACTION: (1.0, 0.9, 0.1, 1.0),
+    NoticeLevel.INFO: (0.9, 0.95, 1.0, 1.0),
+    NoticeLevel.WARNING: (1.0, 0.55, 0.15, 1.0),
+    NoticeLevel.ERROR: (1.0, 0.25, 0.2, 1.0),
+}
+
+# Font sizes per placement: banners must be noticed, side notes must not
+# get in the way.
+NOTICE_SIZES = {NoticePlacement.BANNER: 30.0, NoticePlacement.SIDE: 18.0}
 
 
 @dataclass(frozen=True)
@@ -102,3 +120,18 @@ def is_connection_problem(error: BaseException) -> bool:
     # RuntimeError (not from the built-in one), so it is matched by name to
     # avoid importing krpc at module import time.
     return isinstance(error, (OSError, EOFError)) or type(error).__name__ == "ConnectionError"
+
+
+def show_notice(conn: Any, notice: Notice) -> None:
+    """Display a message on the game screen like a stock message.
+
+    Args:
+        conn: Open kRPC client.
+        notice: The message; its level picks the colour and its placement
+            the position and size.
+    """
+    positions = conn.ui.MessagePosition
+    position = (positions.top_center if notice.placement is NoticePlacement.BANNER
+                else positions.top_right)
+    conn.ui.message(notice.text, notice.duration, position, NOTICE_COLOURS[notice.level],
+                    NOTICE_SIZES[notice.placement])

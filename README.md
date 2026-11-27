@@ -382,6 +382,100 @@ the last stage, and every decoupler in the stages above it. Run
 `ksp-part-tests` with throttle control at the same time: both would
 command the throttle.
 
+## Relay constellation
+
+`ksp-constellation` spreads relay probes evenly around a body (any planet
+or moon), all on the same circular orbit, so that a vessel behind the body
+keeps its link with Kerbin. You design the carrier with the probes and fly
+it into any orbit around the body; the script does the rest:
+
+```powershell
+.venv\Scripts\ksp-constellation --body Mun --body-label Muna --dry-run
+.venv\Scripts\ksp-constellation --body Mun --body-label Muna
+```
+
+It uses a *resonant orbit*, as in
+[Eric Meyer's resonant orbit calculator](https://meyerweb.com/eric/ksp/resonant-orbits/):
+the carrier flies an orbit whose periapsis is at the altitude of the
+constellation and whose period is `(N + 1) / N` times the final one. A
+probe that brakes into the circular orbit at the periapsis completes a
+lap while the others come back to the periapsis `1 / N` of a lap later,
+so the next one lands one slot behind it, and so on.
+
+**The plan.** The number of probes `N` is read from the carrier. The
+altitude is the lowest one where each probe sees its two neighbours over
+the horizon (`r cos(pi / N) = R`), rounded up to the next 10 km
+(`--round`), and never below the atmosphere or the highest mountain. For
+6 probes at the Mun: lowest 30.9 km, so 40 km; resonant orbit 40 x 92 km;
+24.8 m/s of braking per probe. `--altitude` chooses another one; the plan
+warns when the margin before neighbours lose sight is small (6 probes at
+Minmus at 10 km keep only 2 degrees: 20 km is safer). The constellation
+stays in the plane the carrier arrives in (no plane change).
+
+**The steps.**
+
+1. **Insertion**: at most two burns at the apsides put the carrier on the
+   resonant orbit; its period is then trimmed to a tenth of a second.
+2. **Release** near the apoapsis, pointing along the orbit normal, one
+   probe after another. Each probe gets its probe core as control point,
+   the relay type, its antennas and solar panels deployed, and a name:
+   `CA-40-Muna-01 John Doe` (Communication Array, altitude in km, body,
+   position on the ring, an invented person's name). The carrier is
+   renamed `CA-40-Muna Carrier`. Keep the decouplers' ejection force low.
+3. **Line-up**: each probe trims its period a little below the resonant
+   one (more for higher numbers, `--spacing` metres per lap), which also
+   corrects the push of the decouplers: the group stretches forward, ahead
+   of the carrier.
+4. **Carrier disposal**: the carrier brakes until its periapsis is under
+   the surface (or deep in the atmosphere), 30 degrees off retrograde
+   towards the side with fewer probes. A vessel that brakes falls back
+   first; the sideways component takes it out of the plane of the group.
+5. **One probe per periapsis passage**: the *rearmost* probe of the group
+   brakes into the circular orbit, so no other probe is behind it to catch
+   up (braking makes a vessel fall back). Its period is trimmed to the
+   final one within `--period-tolerance` (0.05 s): probes with different
+   periods drift apart forever. It is then renamed with its position on
+   the ring (it may swap numbers with a waiting probe). After the first
+   one, each waiting probe gets a period within seconds of the resonant
+   one, chosen so it reaches the periapsis exactly when its slot comes
+   round.
+
+Before each braking the script predicts where the probe would land: a
+missed periapsis leaves its slot empty, the next passages fill the next
+slots, and the last probe waits the laps it takes for the empty one.
+
+**Waiting.** When the next maneuver is less than `--alarm-after` minutes
+of game time away (default 60) and you are on one of the constellation's
+vessels, time warp gets there. Otherwise a game alarm is set
+`--alarm-lead` minutes before (default 5) and the script waits while you
+play. When the time comes:
+
+- on a vessel of the constellation: it goes ahead;
+- in the space center or the tracking station: it takes command of the
+  vessel it needs (loading the flight scene);
+- on another vessel, in a building or an editor: it warns in red, on
+  screen and in the log, every 30 s, and commands nothing.
+
+With `--no-wait` it stops once the alarm is set. Every decision is taken
+from the orbits in the game, so it can be stopped at any time (Ctrl+C,
+closing the game) and run again another day with the same command: it
+finds the deployment in progress by the probe names.
+
+At the end it reports each probe's orbit, period error, gap to the next
+one and distance from its ideal slot, how long the ring stays in sight
+with those period errors, and warns about gaps out of sight or antennas
+too weak for the distance between neighbours. `--report` measures an
+existing ring.
+
+**The craft.** Each probe needs a probe core (its only one), an engine
+pointing the same way as the core, fuel for its braking plus a few m/s,
+a relay antenna, and power (batteries and solar panels: the burns may
+happen in the shadow). Hold each probe with a decoupler or a docking port;
+stacks work (the outer probe goes first). The carrier's root part should
+be its own command part, and it needs fuel for the insertion and for
+coming down. Tested in a simulated game (6 probes at the Mun: gaps
+60 ± 0.4 degrees, periods within 0.015 s); not yet flown in KSP.
+
 ## Architecture
 
 ```
@@ -391,19 +485,23 @@ src/ksp_control/
 │   ├── ledger.py        Snapshot diff -> events; ledger summary
 │   ├── recovery.py      Recovery value estimate and recovery decisions
 │   ├── part_tests.py    Part test requirements, flight plan, speed governor
-│   └── tourism.py       Tourism contract choice and missions, pilot turns,
-│                        ascent rules, orbital mechanics
+│   ├── tourism.py       Tourism contract choice and missions, pilot turns,
+│   │                    ascent rules, orbital mechanics
+│   └── constellation.py Relay ring plan, resonant orbit, transfers, Kepler
+│                        propagation, slots and probe names
 ├── application/         Use cases + ports
 │   ├── ports.py         GameTelemetryPort, EconomyRepositoryPort, FleetPort,
-│   │                    PartTestGamePort, TourismGamePort
+│   │                    PartTestGamePort, TourismGamePort, ConstellationGamePort
 │   ├── economy_monitor.py
 │   ├── vessel_recovery.py
 │   ├── part_test_assistant.py
 │   ├── tourism_flight.py      Flies a suborbital hop or an orbit, and lands
-│   └── tourism_campaign.py    Contracts -> launch -> flight -> recovery loop
+│   ├── tourism_campaign.py    Contracts -> launch -> flight -> recovery loop
+│   └── relay_constellation.py Carrier -> resonant orbit -> release -> one probe per lap
 ├── adapters/
-│   ├── game/            kRPC telemetry, fleet, part tests and tourism; contract text
-│   │                    parsing; simulated telemetry
+│   ├── game/            kRPC telemetry, fleet, part tests, tourism and constellation;
+│   │                    contract text parsing; simulated telemetry
+│   ├── names.py         Invented people's names (Faker) for vessels
 │   ├── persistence/     sqlite_repository.py
 │   ├── polling.py       Background loop (driving adapter)
 │   └── web/             Flask API + static dashboard (driving adapter)

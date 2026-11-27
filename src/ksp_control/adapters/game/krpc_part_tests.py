@@ -28,12 +28,11 @@ from ksp_control.adapters.game.krpc_connection import (
     connect,
     is_connection_problem,
     read_scene,
+    show_notice,
 )
 from ksp_control.application.ports import (
     GameUnavailableError,
     Notice,
-    NoticeLevel,
-    NoticePlacement,
     PartTestGamePort,
 )
 from ksp_control.domain.model import GameScene
@@ -52,19 +51,6 @@ logger = logging.getLogger(__name__)
 
 TEST_MODULE = "ModuleTestSubject"
 TEST_EVENT = "RunTestEvent"
-
-# Message colours (RGBA) per meaning.
-_COLOURS = {
-    NoticeLevel.SUCCESS: (0.2, 1.0, 0.3, 1.0),
-    NoticeLevel.ACTION: (1.0, 0.9, 0.1, 1.0),
-    NoticeLevel.INFO: (0.9, 0.95, 1.0, 1.0),
-    NoticeLevel.WARNING: (1.0, 0.55, 0.15, 1.0),
-    NoticeLevel.ERROR: (1.0, 0.25, 0.2, 1.0),
-}
-
-# Font sizes per placement: banners must be noticed, side notes must not
-# get in the way.
-_SIZES = {NoticePlacement.BANNER: 30.0, NoticePlacement.SIDE: 18.0}
 
 # How long the list of test parts of a vessel is reused: parts only change
 # when staging, docking or breaking up.
@@ -344,15 +330,8 @@ class KrpcPartTestGame(PartTestGamePort):
         Args:
             notice: The message.
         """
-        def display(conn: Any) -> None:
-            positions = conn.ui.MessagePosition
-            position = (positions.top_center if notice.placement is NoticePlacement.BANNER
-                        else positions.top_right)
-            conn.ui.message(notice.text, notice.duration, position,
-                            _COLOURS[notice.level], _SIZES[notice.placement])
-
         try:
-            self._call(display)
+            self._call(lambda conn: show_notice(conn, notice))
         except GameUnavailableError as error:
             # A message that cannot be shown is not worth stopping for.
             logger.debug("Message not shown: %s", error)

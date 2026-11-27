@@ -8,11 +8,13 @@ library.
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+from ksp_control.domain.constellation import Body, Orbit
 from ksp_control.domain.model import GameScene, GameSnapshot, LedgerEvent, ResourceSample
 from ksp_control.domain.part_tests import EditorState, FlightState, TestContract
 from ksp_control.domain.recovery import VesselReport
@@ -593,6 +595,325 @@ class TourismGamePort(ABC):
 
         Returns:
             Degrees.
+        """
+
+    @abstractmethod
+    def close(self) -> None:
+        """Release any connection held by the adapter."""
+
+
+class Direction(Enum):
+    """Where the autopilot points, relative to the orbit of the vessel."""
+
+    PROGRADE = "prograde"
+    RETROGRADE = "retrograde"
+    NORMAL = "normal"
+
+
+@dataclass(frozen=True)
+class VesselOrbit:
+    """Where a vessel is and how it orbits.
+
+    Attributes:
+        name: Vessel name.
+        body: Name of the body it orbits.
+        situation: KSP situation (``orbiting``, ``escaping``,
+            ``sub_orbital``, ``landed``...).
+        ut: Universal time of the reading, in seconds.
+        periapsis: Periapsis altitude, in metres.
+        apoapsis: Apoapsis altitude, in metres; ``math.inf`` on an escape
+            trajectory.
+        semi_major_axis: In metres (negative on an escape trajectory).
+        period: Seconds per lap; ``math.inf`` on an escape trajectory.
+        radius: Distance from the centre of the body now, in metres.
+        speed: Orbital speed now, in m/s.
+        time_to_periapsis: Seconds to the next periapsis.
+        time_to_apoapsis: Seconds to the next apoapsis (``math.inf`` on an
+            escape trajectory).
+        elements: The Keplerian elements of a closed orbit, to predict
+            positions; ``None`` on an escape trajectory.
+    """
+
+    name: str
+    body: str
+    situation: str
+    ut: float
+    periapsis: float
+    apoapsis: float
+    semi_major_axis: float
+    period: float
+    radius: float
+    speed: float
+    time_to_periapsis: float
+    time_to_apoapsis: float
+    elements: Orbit | None
+
+    @property
+    def closed(self) -> bool:
+        """Whether the vessel is on an elliptical orbit (not escaping).
+
+        Returns:
+            True when it has elements and a finite apoapsis.
+        """
+        return self.elements is not None and math.isfinite(self.apoapsis)
+
+
+class ConstellationGamePort(ABC):
+    """What the relay constellation deployment needs from the game.
+
+    Vessels are named by their (unique) names, since the deployment names
+    every probe and the carrier itself. Commands (throttle, autopilot,
+    engines) act on the active vessel; readings of orbits work for any
+    vessel, loaded or not, and in any scene.
+    """
+
+    @abstractmethod
+    def scene(self) -> GameScene:
+        """Read the current game scene.
+
+        Returns:
+            The scene; ``UNKNOWN`` while a building is open in the space
+            center or the game is loading.
+        """
+
+    @abstractmethod
+    def ut(self) -> float:
+        """Read the universal time.
+
+        Returns:
+            Seconds since the start of the game.
+        """
+
+    @abstractmethod
+    def body(self, name: str) -> Body:
+        """Read a celestial body.
+
+        Args:
+            name: Internal name of the body (``Mun``).
+
+        Returns:
+            Its figures.
+
+        Raises:
+            KeyError: When there is no such body.
+        """
+
+    @abstractmethod
+    def active_vessel(self) -> str | None:
+        """Name the vessel the player flies.
+
+        Returns:
+            Its name, or ``None`` outside the flight scene.
+        """
+
+    @abstractmethod
+    def vessel_names(self) -> list[str]:
+        """List every vessel of the game.
+
+        Returns:
+            Their names.
+        """
+
+    @abstractmethod
+    def orbit(self, vessel: str) -> VesselOrbit | None:
+        """Read the orbit of a vessel.
+
+        Args:
+            vessel: Its name.
+
+        Returns:
+            The orbit, or ``None`` when the vessel does not exist (any
+            more).
+        """
+
+    @abstractmethod
+    def period(self) -> float:
+        """Read the orbital period of the active vessel, quickly.
+
+        Called many times per second while a period is trimmed, so the
+        adapter should make it cheap (a stream).
+
+        Returns:
+            Seconds per lap (``math.inf`` on an escape trajectory).
+        """
+
+    @abstractmethod
+    def mounted_probes(self) -> int:
+        """Count the relay probes still attached to the active vessel.
+
+        A probe is a piece that a decoupler or a docking port would set
+        free, with exactly one probe core on it.
+
+        Returns:
+            How many there are.
+        """
+
+    @abstractmethod
+    def release_probe(self, name: str) -> bool:
+        """Set one probe free from the active vessel and get it ready.
+
+        The new vessel gets the name, the relay type, its probe core as the
+        control point, and its antennas and solar panels deployed. The
+        active vessel stays the carrier.
+
+        Args:
+            name: Name to give it.
+
+        Returns:
+            False when no probe is left to release.
+        """
+
+    @abstractmethod
+    def rename(self, vessel: str, new_name: str) -> None:
+        """Rename a vessel.
+
+        Args:
+            vessel: Its current name.
+            new_name: Its new name.
+        """
+
+    @abstractmethod
+    def switch_to(self, vessel: str) -> None:
+        """Make a vessel the active one, from any scene.
+
+        Blocks until the flight scene shows it, loaded and ready.
+
+        Args:
+            vessel: Its name.
+
+        Raises:
+            GameUnavailableError: When the game does not switch.
+        """
+
+    @abstractmethod
+    def has_control(self) -> bool:
+        """Tell whether the active vessel can be commanded.
+
+        Returns:
+            False without a pilot or a working (powered) probe core.
+        """
+
+    @abstractmethod
+    def prepare_engines(self) -> int:
+        """Ignite every engine of the active vessel that is still off.
+
+        A probe set free by a decoupler has never been staged, so its
+        engines would not respond to the throttle.
+
+        Returns:
+            How many engines are on and have fuel.
+        """
+
+    @abstractmethod
+    def propulsion(self) -> Propulsion:
+        """Read what the active vessel can still do with its engines.
+
+        Returns:
+            Thrust, vacuum specific impulse, mass and vacuum delta-v.
+        """
+
+    @abstractmethod
+    def point(self, direction: Direction) -> None:
+        """Hold a direction of the orbit with the autopilot.
+
+        Args:
+            direction: Where to point.
+        """
+
+    @abstractmethod
+    def relative_positions(self, origin: str, others: list[str]) -> dict[str, tuple[float, float]]:
+        """Where other vessels are, seen along the orbit of one vessel.
+
+        Measured in the same frame ``point_between`` aims in, so a side
+        found here is the side the autopilot turns to.
+
+        Args:
+            origin: The vessel the positions are measured from.
+            others: The vessels to locate.
+
+        Returns:
+            For each one found: its offset along the velocity of
+            ``origin`` and along its orbit normal, in metres.
+        """
+
+    @abstractmethod
+    def point_between(self, prograde: float, normal: float) -> None:
+        """Hold a direction mixing prograde and normal, with the autopilot.
+
+        Args:
+            prograde: Component along the velocity (negative: retrograde).
+            normal: Component along the orbit normal (negative: anti-normal).
+        """
+
+    @abstractmethod
+    def pointing_error(self) -> float:
+        """Angle between where the autopilot aims and where the nose points.
+
+        Returns:
+            Degrees.
+        """
+
+    @abstractmethod
+    def set_throttle(self, value: float) -> None:
+        """Set the main throttle of the active vessel.
+
+        Args:
+            value: Between 0 and 1.
+        """
+
+    @abstractmethod
+    def release_controls(self) -> None:
+        """Disengage the autopilot and leave the throttle at zero."""
+
+    @abstractmethod
+    def warp_to(self, ut: float) -> None:
+        """Time warp until a universal time (blocks).
+
+        Args:
+            ut: Universal time to reach.
+        """
+
+    @abstractmethod
+    def set_alarm(self, ut: float, vessel: str, title: str, description: str) -> None:
+        """Create a game alarm (stock alarm clock) linked to a vessel.
+
+        Args:
+            ut: Universal time when it goes off.
+            vessel: Vessel it belongs to (the alarm offers to jump to it).
+            title: Its title.
+            description: What it is about.
+        """
+
+    @abstractmethod
+    def remove_alarms(self, title_prefix: str) -> int:
+        """Delete the game alarms whose titles start with a text.
+
+        Args:
+            title_prefix: Start of the titles.
+
+        Returns:
+            How many were deleted.
+        """
+
+    @abstractmethod
+    def show(self, notice: Notice) -> None:
+        """Show a message on the game screen (never fails).
+
+        Args:
+            notice: The message.
+        """
+
+    @abstractmethod
+    def comms_power(self, vessel: str) -> float:
+        """Read the combined antenna power of a vessel.
+
+        Two vessels reach each other up to ``sqrt(P1 * P2)`` metres.
+
+        Args:
+            vessel: Its name.
+
+        Returns:
+            The power, in metres; 0 when unknown.
         """
 
     @abstractmethod

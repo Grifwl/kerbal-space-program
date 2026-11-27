@@ -14,6 +14,8 @@ dependencies = [
     # release lines cannot talk to each other. Bump this together with the mod.
     "krpc==0.8.0",
     "flask>=3.0",
+    # Invented people's names for the relay probes ("CA-40-Muna-01 John Doe").
+    "faker>=30",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +26,7 @@ ksp-economy-monitor = "ksp_control.entrypoints.economy_monitor:main"
 ksp-recover = "ksp_control.entrypoints.recover_vessels:main"
 ksp-part-tests = "ksp_control.entrypoints.part_tests:main"
 ksp-tourism = "ksp_control.entrypoints.tourism:main"
+ksp-constellation = "ksp_control.entrypoints.constellation:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
