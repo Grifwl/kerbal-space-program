@@ -328,7 +328,7 @@ class KrpcConstellationGame(ConstellationGamePort):
                 if is_connection_problem(error):
                     raise
                 logger.warning("%s: could not control it from its probe core: %s", name, error)
-            self._deploy(probe)
+            self._deploy_antennas(probe)
             if space_center.active_vessel != carrier:
                 space_center.active_vessel = carrier
             self._vessels[name] = probe
@@ -414,6 +414,15 @@ class KrpcConstellationGame(ConstellationGamePort):
             return ready
 
         return int(self._call(act))
+
+    def deploy_solar_panels(self) -> int:
+        """Deploy the solar panels of the active vessel that are retracted.
+
+        Returns:
+            How many panels this call deployed (0 when all were out).
+        """
+        return int(self._call(
+            lambda conn: self._deploy_parts(conn.space_center.active_vessel.parts.solar_panels)))
 
     def propulsion(self) -> Propulsion:
         """Read what the active vessel can do with its engines.
@@ -637,19 +646,41 @@ class KrpcConstellationGame(ConstellationGamePort):
         self._period = None
 
     @staticmethod
-    def _deploy(vessel: Any) -> None:
-        """Deploy the antennas and solar panels of a released probe.
+    def _deploy_antennas(vessel: Any) -> None:
+        """Deploy the antennas of a released probe.
+
+        Only the antennas: the probe needs its link to be commanded. The
+        solar panels wait until it has lined up (see
+        ``deploy_solar_panels``).
 
         Args:
             vessel: The remote probe.
         """
-        for part in (*vessel.parts.antennas, *vessel.parts.solar_panels):
+        KrpcConstellationGame._deploy_parts(vessel.parts.antennas)
+
+    @staticmethod
+    def _deploy_parts(parts: Any) -> int:
+        """Deploy every deployable part of a list that is still retracted.
+
+        A part that refuses (broken, blocked by a fairing...) is skipped:
+        the probe can still do its job with the others.
+
+        Args:
+            parts: kRPC antennas or solar panels.
+
+        Returns:
+            How many parts were deployed by this call.
+        """
+        deployed = 0
+        for part in parts:
             try:
                 if part.deployable and not part.deployed:
                     part.deployed = True
+                    deployed += 1
             except RECOVERABLE_ERRORS as error:
                 if is_connection_problem(error):
                     raise
+        return deployed
 
     @staticmethod
     def _mounts(vessel: Any) -> list[tuple[list[Any], tuple[str, Any, int]]]:

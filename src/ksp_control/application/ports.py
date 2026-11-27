@@ -801,8 +801,9 @@ class ConstellationGamePort(ABC):
         """Set one probe free from the active vessel and get it ready.
 
         The new vessel gets the name, the relay type, its probe core as the
-        control point, and its antennas and solar panels deployed. The
-        active vessel stays the carrier.
+        control point, and its antennas deployed (its solar panels stay
+        retracted until it has lined up). The active vessel stays the
+        carrier.
 
         Args:
             name: Name to give it.
@@ -850,6 +851,15 @@ class ConstellationGamePort(ABC):
 
         Returns:
             How many engines are on and have fuel.
+        """
+
+    @abstractmethod
+    def deploy_solar_panels(self) -> int:
+        """Deploy the solar panels of the active vessel that are retracted.
+
+        Returns:
+            How many panels this call deployed (0 when all were out
+            already, or when it has none).
         """
 
     @abstractmethod

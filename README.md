@@ -467,14 +467,17 @@ stays in the plane the carrier arrives in (no plane change).
    resonant orbit; its period is then trimmed to a tenth of a second.
 2. **Release** near the apoapsis, pointing along the orbit normal, one
    probe after another. Each probe gets its probe core as control point,
-   the relay type, its antennas and solar panels deployed, and a name:
+   the relay type, its antennas deployed, and a name:
    `CA-40-Muna-01 John Doe` (Communication Array, altitude in km, body,
    position on the ring, an invented person's name). The carrier is
    renamed `CA-40-Muna Carrier`. Keep the decouplers' ejection force low.
 3. **Line-up**: each probe trims its period a little below the resonant
    one (more for higher numbers, `--spacing` metres per lap), which also
    corrects the push of the decouplers: the group stretches forward, ahead
-   of the carrier.
+   of the carrier. Once a probe has lined up, it deploys its solar panels
+   (never next to the carrier and the other probes). A probe that needed
+   no trim, or a run stopped in between, gets them out the next time the
+   script takes command of it.
 4. **Carrier disposal**: the carrier brakes until its periapsis is under
    the surface (or deep in the atmosphere), 30 degrees off retrograde
    towards the side with fewer probes. A vessel that brakes falls back
@@ -519,7 +522,8 @@ existing ring.
 **The craft.** Each probe needs a probe core (its only one), an engine
 pointing the same way as the core, fuel for its braking plus a few m/s,
 a relay antenna, and power (batteries and solar panels: the burns may
-happen in the shadow). Hold each probe with a decoupler or a docking port;
+happen in the shadow, and the batteries alone must last from the release
+until the panels come out after the line-up). Hold each probe with a decoupler or a docking port;
 stacks work (the outer probe goes first). The carrier's root part should
 be its own command part, and it needs fuel for the insertion and for
 coming down. Tested in a simulated game (6 probes at the Mun: gaps

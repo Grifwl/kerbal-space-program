@@ -9,12 +9,14 @@ orbit around the body. From there this use case:
    period to a fraction of a second.
 2. **Release**: near the apoapsis (the furthest point from the first
    braking), pointing along the orbit normal, it sets every probe free and
-   names it ``CA-<km>-<body>-<nn> <person>``. The carrier is renamed so a
-   later run can find it.
+   names it ``CA-<km>-<body>-<nn> <person>``, with its antennas deployed.
+   The carrier is renamed so a later run can find it.
 3. **Drift**: each probe trims its period to a little *less* than the
    resonant one, more for the higher numbers: the group stretches forward
    into a line with the carrier at the back. This also corrects whatever
-   push the decouplers gave them.
+   push the decouplers gave them. Once lined up, each probe deploys its
+   solar panels (the player's rule: not while it is still next to the
+   carrier and the other probes).
 4. **Carrier disposal**: the carrier brakes until its periapsis is under
    the surface (or deep in the atmosphere). A vessel that brakes first
    falls *back* and then drops below; the decouplers may have pushed a
@@ -857,6 +859,9 @@ class ConstellationDeployer:
                                       "Drift period")
             self._check_trim(name, error, self._options.resonant_tolerance)
             logger.info("%s on its drift period (%+.2f s)", name, error)
+            # Lined up: only now, away from the carrier and the others,
+            # do the solar panels come out.
+            self._deploy_solar_panels(name)
 
     def _settle(self, s: _Survey) -> None:
         """Put every waiting probe on its settle period (see ``_settle_targets``).
@@ -871,6 +876,7 @@ class ConstellationDeployer:
             if not self._acquire(name, f"stop {name} drifting", self._game.ut()):
                 return
             self._prepare(name)
+            self._deploy_solar_panels(name)
             error = self._trim_period(name, target, self._options.resonant_tolerance,
                                       "Settle period")
             self._check_trim(name, error, self._options.resonant_tolerance)
@@ -1002,6 +1008,7 @@ class ConstellationDeployer:
                            probe)
             return
         self._prepare(probe)
+        self._deploy_solar_panels(probe)
         propulsion = self._game.propulsion()
         duration = burn_time(plan.injection_delta_v, propulsion.thrust, propulsion.isp,
                              propulsion.mass)
@@ -1025,6 +1032,7 @@ class ConstellationDeployer:
                 if not self._acquire(name, f"trim the period of {name}", self._game.ut()):
                     return
                 self._prepare(name)
+                self._deploy_solar_panels(name)
                 error = self._trim_period(name, self._plan.period, self._options.period_tolerance,
                                           "Final period")
                 self._check_trim(name, error, self._options.period_tolerance)
@@ -1094,6 +1102,21 @@ class ConstellationDeployer:
             raise DeploymentError(f"{vessel} cannot be controlled: no power for its probe core?")
         if self._game.prepare_engines() == 0:
             raise DeploymentError(f"{vessel} has no engine with fuel")
+
+    def _deploy_solar_panels(self, vessel: str) -> None:
+        """Deploy the solar panels of the active probe, once it has lined up.
+
+        The drift step calls it right after each trim. The later steps call
+        it too whenever they take command of a probe, so a probe whose drift
+        needed no trim, or a run stopped in between, still gets its panels
+        out; on a probe whose panels are already out it does nothing.
+
+        Args:
+            vessel: Name of the active probe.
+        """
+        deployed = self._game.deploy_solar_panels()
+        if deployed:
+            logger.info("%s: %d solar panel(s) deployed", vessel, deployed)
 
     def _wait_for_burn(self, direction: Direction, start_ut: float) -> None:
         """Turn the vessel and wait (warping) until a burn starts.

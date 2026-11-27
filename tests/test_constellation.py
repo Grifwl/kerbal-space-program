@@ -201,6 +201,7 @@ class SimVessel:
     mounted: int = 0
     power: float = 5e8
     pointing: Direction | tuple[float, float] | None = None
+    panels_out: bool = False
 
 
 @dataclass
@@ -225,6 +226,7 @@ class SimGame(ConstellationGamePort):
     warps: list[float] = field(default_factory=list)
     brake_violations: list[str] = field(default_factory=list)
     brakes: list[str] = field(default_factory=list)
+    panels: list[tuple[str, int]] = field(default_factory=list)
     on_time: Callable[["SimGame"], None] | None = None
     kick: float = 0.6
     plan_radius: float = 0.0
@@ -398,6 +400,15 @@ class SimGame(ConstellationGamePort):
         v.engines_on = True
         return 1 if v.delta_v > 0 else 0
 
+    def deploy_solar_panels(self) -> int:
+        """Unfold the panels of the active vessel, noting how many brakes came before."""
+        v = self.vessels[self.active]
+        if v.panels_out:
+            return 0
+        v.panels_out = True
+        self.panels.append((self.active, len(self.brakes)))
+        return 1
+
     def propulsion(self) -> Propulsion:
         v = self.vessels[self.active]
         return Propulsion(v.thrust if v.engines_on else 0.0, v.isp, v.mass, v.delta_v)
@@ -511,6 +522,18 @@ def test_full_deployment_spreads_six_probes_around_the_mun():
     # The first probe to brake took position 1 (people's names never change).
     first_person = parse_probe_name(probes[0], "CA-40-Muna-")[1]
     assert probe_name("CA-40-Muna-", 1, first_person) in game.vessels
+
+
+def test_solar_panels_come_out_once_each_probe_has_lined_up():
+    game = _game()
+    _deployer(game).run()
+    ring = {n: v for n, v in game.vessels.items() if parse_probe_name(n, "CA-40-Muna-")}
+    assert len(ring) == 6 and all(v.panels_out for v in ring.values())
+    # Never on the carrier, and every probe during the line-up: after its
+    # drift trim, before the carrier brakes out of the orbit.
+    assert not game.vessels["CA-40-Muna Carrier"].panels_out
+    assert len(game.panels) == 6
+    assert all(brakes == 0 for _, brakes in game.panels)
 
 
 def test_alarm_and_red_warning_while_the_player_is_elsewhere_then_a_missed_pass():
